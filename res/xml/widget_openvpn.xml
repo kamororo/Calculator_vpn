@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- OpenVPN home-screen widget provider. Same sizing/resize model as
+     widget_v2ray.xml: 1x1 base, resizable to 1x2, 1x3 or 2x2 by long-press. -->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="70dp"
+    android:minHeight="70dp"
+    android:minResizeWidth="70dp"
+    android:minResizeHeight="70dp"
+    android:updatePeriodMillis="0"
+    android:initialLayout="@layout/widget_small"
+    android:resizeMode="horizontal|vertical"
+    android:widgetCategory="home_screen" />

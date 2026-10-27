@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.renamer"
+    android:versionCode="63"
+    android:versionName="1.62">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="36" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" />
+    <!-- Permissions the ics-openvpn core needs, which were
+         in its own library manifest but are NOT merged
+         by our manual aapt2 link, so they must live here:
+         ACCESS_NETWORK_STATE (DeviceStateReceiver calls
+         getActiveNetworkInfo, which throws SecurityException
+         without it) and POST_NOTIFICATIONS. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Smart Connect must list every installed app (Telegram,
+         Instagram, ...) to let the user pick triggers. Without
+         this, Android 11+ package visibility hides most
+         third-party apps from getInstalledApplications. -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
+    <!-- Android 14+ (targetSdk 34): a foreground service
+         MUST declare its type, otherwise startForeground()
+         throws MissingForegroundServiceTypeException, which
+         OpenVPNService catches in showNotification, so the
+         service never becomes foreground and the system
+         then crashes the app with
+         ForegroundServiceDidNotStartInTimeException —
+         exactly the "calculator keeps stopping" the user
+         saw in v1.24 right after CONNECTING. VPN has no
+         dedicated type, so specialUse + its permission. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <application android:label="calculator" android:icon="@mipmap/ic_launcher" android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity android:name=".PinActivity" android:exported="true" android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".HomeActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".RenameActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".SubscriptionActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".PublicActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".VpnActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".EmergencyActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".EmergencySettingsActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".WireGuardActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".OpenVpnActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".OpenVpnImportActivity" android:exported="false" android:screenOrientation="portrait" />
+        <!-- OpenVPN3 engine's own VpnService. It runs
+             the OpenVPN3 core in-process and builds
+             the TUN through the TunBuilder callbacks,
+             exactly like the official OpenVPN Connect
+             app. This replaces the ics-openvpn 2.x
+             engine (kept declared below, unused). -->
+        <service android:name=".Ovpn3VpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+        <!-- Official ics-openvpn core's own VpnService.
+             OpenVpnApi starts it, and it builds the TUN
+             and runs the native openvpn binary, exactly
+             like the official OpenVPN Connect app. -->
+        <service android:name="de.blinkt.openvpn.core.OpenVPNService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="specialUse"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+        <!-- Activities the ics-openvpn notification
+             refers to (disconnect action, user input).
+             Without them, tapping the notification
+             action would fail. -->
+        <activity android:name="de.blinkt.openvpn.DisconnectVPNActivity"
+            android:exported="false"
+            android:theme="@style/blinkt.dialog" />
+        <activity android:name="de.blinkt.openvpn.LaunchVPN"
+            android:exported="false" />
+        <service android:name="de.blinkt.openvpn.core.OpenVPNStatusService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:exported="false" />
+        <!-- Official WireGuard Go backend's own VpnService.
+             GoBackend starts this service itself and builds
+             the TUN through it, exactly like the official
+             WireGuard app. -->
+        <service
+            android:name="com.wireguard.android.backend.GoBackend$VpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:exported="false" />
+        <activity android:name=".HomeSettingsActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".ReorderActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".ChangePublicPinActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".ChainActivity" android:screenOrientation="portrait" />
+        <activity android:name=".HydraActivity" android:screenOrientation="portrait" />
+        <activity android:name=".HydraOptionsActivity" android:screenOrientation="portrait" />
+        <activity android:name=".HydraReportActivity" android:screenOrientation="portrait" />
+        <activity android:name=".GuideDetailActivity" android:screenOrientation="portrait" />
+        <activity android:name=".WidgetToggleActivity" android:theme="@android:style/Theme.Translucent.NoTitleBar" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".WelcomeActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".WidgetPickerActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".LoginPersonalizationActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".GuideActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".ScanActivity" android:exported="false" android:screenOrientation="portrait" />
+        <service android:name=".VpnClientService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="specialUse"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+        </service>
+        <activity android:name=".VpnSettingsActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".SmartConnectActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".VpnSubActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".VpnSubEditActivity" android:exported="false" android:screenOrientation="portrait" />
+        <service android:name=".ProxyOnlyService" android:exported="false" android:foregroundServiceType="specialUse" />
+        <service android:name=".PingTestService" android:exported="false" android:foregroundServiceType="dataSync" />
+        <service android:name=".SmartConnectService" android:exported="false" android:foregroundServiceType="dataSync" />
+        <service android:name=".HydraService" android:exported="false" android:foregroundServiceType="dataSync" />
+        <receiver android:name=".VpnWidgetProvider" android:exported="false">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_v2ray" />
+        </receiver>
+        <receiver android:name=".WgWidgetProvider" android:exported="false">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_wireguard" />
+        </receiver>
+        <receiver android:name=".OvpnWidgetProvider" android:exported="false">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_openvpn" />
+        </receiver>
+        <receiver android:name=".VpnActionReceiver" android:exported="false" />
+            <receiver android:name=".SmartBootReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

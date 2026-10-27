@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- v2ray home-screen widget provider.
+     Base size 1x1 (70dp x 70dp). The user can long-press the widget on
+     their home screen and resize it to 1x2, 1x3 or 2x2: resizeMode below
+     allows horizontal and vertical resize, and VpnWidgetProvider switches
+     the layout (small / medium / large) from the widget's actual size in
+     onAppWidgetOptionsChanged. There is deliberately ONE provider per
+     section, not four fixed-size providers. -->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="70dp"
+    android:minHeight="70dp"
+    android:minResizeWidth="70dp"
+    android:minResizeHeight="70dp"
+    android:updatePeriodMillis="0"
+    android:initialLayout="@layout/widget_small"
+    android:resizeMode="horizontal|vertical"
+    android:widgetCategory="home_screen" />

@@ -1,0 +1,5 @@
+out/
+*.apk
+*.keystore
+*.jks
+res/values/strings.xml
