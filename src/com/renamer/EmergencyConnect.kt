@@ -33,27 +33,56 @@ object EmergencyConnect {
 
     fun connect(ctx: Context): Boolean {
         try {
+            // 2.43: central log, generic on purpose:
+            // emergency configs are never named.
+            val emEng = AdaptiveEngine.isEnabled(ctx)
+            AppLog.append(ctx, "emergency",
+                "تلاش اتصال آغاز شد؛ موتور هوشمند: ${if (emEng) "روشن" else "خاموش"}.",
+                "Connect attempt started; smart engine: ${if (emEng) "ON" else "OFF"}.")
             val sorted = sortedConfigs(ctx)
             // Try in ping order, up to 3 attempts, with
             // a 6s isRunning check after each start —
             // the same fallback the emergency page uses.
             for (i in 0 until minOf(3, sorted.size)) {
-                if (start(ctx, sorted[i])) {
+                // ADAPTIVE ENGINE (1.79): engine-first
+                // for the emergency target too, with
+                // the normal emergency start as
+                // fallback. Generic section: no real
+                // names, no IPs, nothing memorized.
+                val cfg = sorted[i]
+                var plan: AdaptiveEngine.Plan? = null
+                if (AdaptiveEngine.isEnabled(ctx)) {
+                    try {
+                        val pool = sorted.filter { it != cfg }.take(8)
+                        plan = AdaptiveEngine.selectV2ray(ctx, cfg, AdaptiveEngine.S_EMERGENCY, 20000, pool)
+                    } catch (_: Exception) { plan = null }
+                }
+                if (start(ctx, cfg, plan)) {
                     val deadline = System.currentTimeMillis() + 6000
                     while (System.currentTimeMillis() < deadline) {
-                        if (VpnClientService.isRunning) return true
+                        if (VpnClientService.isRunning) {
+                            AppLog.append(ctx, "emergency",
+                                "وصل شد (بدون نام کانفیگ).",
+                                "Connected (no config name).")
+                            // 2.45: generic on purpose, like
+                            // every emergency log line.
+                            ConnVerify.verifyXray(ctx, "emergency", "emergency", "", VpnConfigBuilder.socksPort(ctx)) { VpnClientService.isRunning }
+                            return true
+                        }
                         Thread.sleep(500)
                     }
                     // Not actually up: stop and try next.
                     try {
-                        val stop = Intent(ctx, VpnClientService::class.java).apply { action = "STOP" }
+                        val stop = Intent(ctx, VpnClientService::class.java).apply { action = "STOP" ; putExtra("stop_gen", VpnClientService.sessionGen) }
                         ctx.startService(stop)
                     } catch (_: Exception) {}
-                    try { ctx.stopService(Intent(ctx, VpnClientService::class.java)) } catch (_: Exception) {}
                     VpnClientService.isRunning = false
                     VpnClientService.emergencyConfig = null
                 }
             }
+            AppLog.append(ctx, "emergency",
+                "وصل نشد؛ هیچ تلاشی بالا نیامد.",
+                "Did not connect; no attempt came up.")
             return false
         } catch (_: Throwable) {
             return false
@@ -158,9 +187,11 @@ object EmergencyConnect {
         }
     }
 
-    private fun start(ctx: Context, cfg: String): Boolean {
-        val vpnConfig = VpnConfigBuilder.build(ctx, cfg) ?: return false
-        VpnClientService.emergencyConfig = cfg
+    private fun start(ctx: Context, cfg: String, plan: AdaptiveEngine.Plan? = null): Boolean {
+        val effective = plan?.link ?: cfg
+        var vpnConfig = VpnConfigBuilder.build(ctx, effective) ?: return false
+        vpnConfig = AdaptiveEngine.applyPlanToBuiltJson(ctx, vpnConfig, plan, true) ?: return false
+        VpnClientService.emergencyConfig = effective
         val intent = Intent(ctx, VpnClientService::class.java).apply {
             putExtra("config", vpnConfig)
             putExtra("name", AppLanguage.t(ctx, "اتصال اضطراری", "Emergency connect"))
@@ -169,6 +200,12 @@ object EmergencyConnect {
             // section's: the emergency page must not
             // light up for it.
             putExtra("session_tag", "smart")
+            // ADAPTIVE ENGINE (1.79): mark the session
+            // for the service watchdog.
+            if (plan != null) {
+                putExtra("engine_session", true)
+                putExtra("engine_orig_link", cfg)
+            }
         }
         return try {
             ctx.startService(intent)

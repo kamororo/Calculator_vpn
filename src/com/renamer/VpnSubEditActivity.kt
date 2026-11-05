@@ -1,6 +1,7 @@
 package com.renamer
 
 import android.app.Activity
+import android.graphics.Color
 import android.os.Bundle
 import android.view.Gravity
 import android.widget.ArrayAdapter
@@ -60,6 +61,7 @@ class VpnSubEditActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             addView(Button(this@VpnSubEditActivity).apply {
                 text = "←"
+                
                 setOnClickListener { finish() }
             })
             addView(TextView(this@VpnSubEditActivity).apply {
@@ -74,6 +76,7 @@ class VpnSubEditActivity : Activity() {
             if (originalUrl.isNotBlank()) {
                 addView(Button(this@VpnSubEditActivity).apply {
                     text = "✕"
+                    
                     setOnClickListener {
                         android.app.AlertDialog.Builder(this@VpnSubEditActivity)
                             .setTitle(L("حذف سابسکریبشن", "Delete subscription"))
@@ -92,12 +95,13 @@ class VpnSubEditActivity : Activity() {
             }
             addView(Button(this@VpnSubEditActivity).apply {
                 text = "✓"
+                
                 setOnClickListener { save() }
             })
         })
         status = TextView(this).apply {
             textSize = 13f
-            setTextColor(android.graphics.Color.GRAY)
+            setTextColor(Color.GRAY)
             setPadding(0, (8 * d).toInt(), 0, (8 * d).toInt())
         }
         root.addView(status)
@@ -177,7 +181,7 @@ class VpnSubEditActivity : Activity() {
             text = L("ترتیب زنجیره در اتصال: دستگاه ← پروکسی قبلی ← کانفیگ ← پروکسی بعدی ← مقصد.",
                 "Chain order at connect: device -> previous proxy -> config -> next proxy -> destination.")
             textSize = 13f
-            setTextColor(android.graphics.Color.GRAY)
+            setTextColor(Color.GRAY)
             setPadding(0, (16 * d).toInt(), 0, 0)
         })
         setContentView(scroll)

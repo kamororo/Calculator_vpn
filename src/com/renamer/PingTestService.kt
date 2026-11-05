@@ -27,6 +27,8 @@ import java.util.concurrent.atomic.AtomicInteger
  *           "subs": sub urls, "sub_stats": previous per-sub stats.
  *  live   - "ping_healthy_live": healthy configs, newline-joined,
  *           appended in completion order as each one is found.
+ *           "ping_live_sub": per-sub healthy counts (JSON
+ *           url -> count), bumped per find, like the live list.
  *           "ping_progress_done" / "ping_progress_total" /
  *           "ping_progress_healthy": ints, updated per config.
  *  output - "ping_done": true when finished (or failed/stopped
@@ -127,6 +129,7 @@ class PingTestService : Service() {
                 .putBoolean("ping_done", false)
                 .putBoolean("ping_applied", false)
                 .putString("ping_error", "")
+                .putString("ping_live_sub", "{}")
                 .apply()
             val list = (prefs().getString("ping_test_list", "") ?: "")
                 .lines().map { it.trim() }.filter { it.isNotBlank() }
@@ -136,7 +139,13 @@ class PingTestService : Service() {
                 .putInt("ping_progress_done", 0)
                 .putInt("ping_progress_healthy", 0)
                 .putString("ping_healthy_live", "")
+                .putString("ping_live_sub", "{}")
                 .apply()
+            val sourceMap = mutableMapOf<String, String>()
+            try {
+                val j = JSONObject(prefs().getString("sub_source_map", "{}") ?: "{}")
+                for (key in j.keys()) sourceMap[key] = j.optString(key, "")
+            } catch (_: Throwable) {}
             if (total == 0) {
                 finishWith(emptyList(), null)
                 return
@@ -148,6 +157,7 @@ class PingTestService : Service() {
             val done = AtomicInteger(0)
             val healthyCount = AtomicInteger(0)
             val results = mutableListOf<Pair<String, Long>>()
+            val allDelays = mutableListOf<Pair<String, Long>>()
             val resultsLock = Any()
             val liveLock = Any()
             pool = Executors.newFixedThreadPool(XraySpeedtest.poolSize())
@@ -157,6 +167,9 @@ class PingTestService : Service() {
                     var delay = -1L
                     try { delay = measureOne(cfg) } catch (_: Throwable) { delay = -1L }
                     if (stopped) return@submit
+                    // 2.45: record EVERY attempt (healthy
+                    // and failed) for the central log.
+                    synchronized(resultsLock) { allDelays += cfg to delay }
                     if (delay >= 0) {
                         synchronized(resultsLock) { results += cfg to delay }
                         healthyCount.incrementAndGet()
@@ -166,7 +179,9 @@ class PingTestService : Service() {
                         synchronized(liveLock) {
                             val cur = prefs().getString("ping_healthy_live", "") ?: ""
                             val next = if (cur.isBlank()) cfg else "$cur\n$cfg"
-                            prefs().edit().putString("ping_healthy_live", next).apply()
+                            prefs().edit()
+                                .putString("ping_healthy_live", next)
+                                .apply()
                         }
                     }
                     val d = done.incrementAndGet()
@@ -187,6 +202,16 @@ class PingTestService : Service() {
             pool.shutdown()
             if (stopped) return
             val sorted = synchronized(resultsLock) { results.sortedBy { it.second } }
+            // 2.45: persist every measured delay so a
+            // later connect line can show this
+            // config's last ping (or its failure).
+            try {
+                val dj = org.json.JSONObject()
+                synchronized(resultsLock) {
+                    for ((c, d) in allDelays) dj.put(XraySpeedtest.dedupKey(c), d)
+                }
+                prefs().edit().putString("ping_delays", dj.toString()).apply()
+            } catch (_: Exception) {}
             finishWith(sorted.map { it.first }, null)
         } catch (t: Throwable) {
             try {
@@ -240,16 +265,22 @@ class PingTestService : Service() {
                 o.put("healthy", healthyPerSub[url] ?: 0)
                 statsJson.put(url, o)
             }
+            val liveSubJson = JSONObject()
+            for ((u, c) in healthyPerSub) liveSubJson.put(u, c)
             prefs().edit()
                 .putString("last_healthy", healthySorted.joinToString("\n"))
                 .putString("box2", healthySorted.joinToString("\n"))
                 .putString("sub_stats", statsJson.toString())
+                .putString("ping_live_sub", liveSubJson.toString())
                 .putInt("ping_progress_done", prefs().getInt("ping_progress_total", 0))
                 .putInt("ping_progress_healthy", healthySorted.size)
                 .putBoolean("ping_done", true)
                 .putBoolean("ping_running", false)
                 .putString("ping_error", error ?: "")
                 .apply()
+                AppLog.append(this, "ping",
+                    "تست پینگ تمام شد؛ سالم: ${healthySorted.size} از ${prefs().getInt("ping_progress_total", 0)}." + if (!error.isNullOrBlank()) " خطا: $error." else "",
+                    "Ping test done; healthy: ${healthySorted.size} of ${prefs().getInt("ping_progress_total", 0)}." + if (!error.isNullOrBlank()) " Error: $error." else "")
         } catch (_: Throwable) {
             try {
                 prefs().edit()

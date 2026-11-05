@@ -90,6 +90,12 @@ class SmartConnectService : Service() {
         // counts after MINIMIZE_GRACE_MS away. A quick
         // hop to Home/recents and back never cuts.
         const val MINIMIZE_GRACE_MS = 5000L
+        // Persistent absence: a real leave already
+        // stamped, followed by this much longer of
+        // null/SystemUI foreground (lock, recents
+        // left open, idle), also cuts — a transient
+        // flash is far shorter, so it never does.
+        const val PERSISTENT_ABSENCE_MS = 25000L
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -104,6 +110,12 @@ class SmartConnectService : Service() {
     // selected app. The old smart_last_selected key
     // is cleared and unused.
     private var lastAttemptPkg: String? = null
+    // 2.55: the app label snapshotted at attempt time.
+    // The outcome line must name the app the attempt
+    // was FOR, even if a later poll cycle already
+    // cleared lastAttemptPkg (which used to print "؟"
+    // for the first smart connect of a session).
+    private var lastAttemptLabel: String? = null
     private var lastAttemptTime = 0L
     // Last foreground package seen (non-null only):
     // detects a RE-ENTRY into a selected app, so a
@@ -117,6 +129,13 @@ class SmartConnectService : Service() {
     // Auto-kill must fire once per leave, not every
     // 5s while the user stays away.
     private var killDoneForLeave = false
+    // 2.62: repeats left for the leave-kill: an app
+    // that restarts its own background process gets
+    // killed again on the next few polls, so one
+    // restart does not undo the kill. Cleared on
+    // re-entry, so an app the user is back inside
+    // is never repeat-killed.
+    private var killRepeatLeft = 0
     // True when the last attempt for lastAttemptPkg
     // actually connected. The 60s retry guard below
     // must ONLY pace failures: after a successful
@@ -251,12 +270,56 @@ class SmartConnectService : Service() {
         } catch (_: Exception) {}
     }
 
+    /** Name of the VPN Smart currently owns, for
+     *  the status line: v2ray/emergency/hydra use
+     *  the session name, WireGuard the active
+     *  tunnel, OpenVPN the active profile. */
+    private fun ownedVpnLabel(): String? {
+        return try {
+            when (smartPrefs().getString("smart_target", "v2ray")) {
+                "wireguard", "amnezia" -> WgDirect.activeConf(this)?.first
+                "openvpn" -> OvpnEngine.activeName?.takeIf { it.isNotBlank() }
+                else -> VpnClientService.currentName?.takeIf { it.isNotBlank() }
+            }
+        } catch (_: Exception) { null }
+    }
+
+    /** Update the foreground notification's text
+     *  (same id/channel as onCreate), so the shade
+     *  shows which config Smart connected to — not
+     *  just "watching". Only called on connect /
+     *  disconnect transitions, never on every poll. */
+    private fun refreshNotif(text: String) {
+        try {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val n = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                Notification.Builder(this, CHANNEL_ID)
+                    .setContentTitle("Smart Connect")
+                    .setContentText(text)
+                    .setSmallIcon(android.R.drawable.ic_dialog_info)
+                    .build()
+            } else {
+                @Suppress("DEPRECATION")
+                Notification.Builder(this)
+                    .setContentTitle("Smart Connect")
+                    .setContentText(text)
+                    .setSmallIcon(android.R.drawable.ic_dialog_info)
+                    .build()
+            }
+            nm.notify(NOTIFICATION_ID, n)
+        } catch (_: Exception) {}
+    }
+
     /** Any VPN up: ours (v2ray / WG / OpenVPN) OR another
      *  app's, detected from the system's active network
      *  (TRANSPORT_VPN). Smart connect must stay quiet
      *  while any of these is up. */
     private fun anyVpnUp(): Boolean {
-        if (VpnClientService.isRunning || WgDirect.isUp(this) || OvpnEngine.isConnected) return true
+        // Never gate on the stale widget pref (guard
+        // item 5): ground truth is GoBackend's live
+        // tunnels, and a stale flag is repaired here.
+        try { WgDirect.clearStaleFlag(this) } catch (_: Exception) {}
+        if (VpnClientService.isRunning || WgDirect.isLive(this) || OvpnEngine.isConnected) return true
         return try {
             val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
             val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
@@ -320,8 +383,14 @@ class SmartConnectService : Service() {
     //  2. Leaving a selected app for >5s (grace)
     //     disconnects ONLY a smart-owned VPN
     //     (smart_owns_vpn); a hand-started VPN is
-    //     NEVER disturbed. Own package + SystemUI
-    //     exempt; null foreground never disconnects.
+    //     NEVER disturbed. Own package exempt;
+    //     SystemUI/null never START the timer and
+    //     never cut on a transient flash — BUT a
+    //     real leave followed by 30s of persistent
+    //     SystemUI/null absence (lock, recents left
+    //     open, idle) DOES cut (amended 2026-10-28
+    //     to fix missed disconnects; the transient
+    //     protection is fully kept).
     //  3. NO cooldown blocks a fresh open: re-entry
     //     into a selected app (lastSeenFg) resets the
     //     failed-attempt markers; within one session
@@ -338,7 +407,8 @@ class SmartConnectService : Service() {
     //  6. smart_kill_on_close stays OPT-IN, default
     //     OFF (it can cut a call/download in the
     //     left app); when on, it kills once per
-    //     leave, background processes only.
+    //     leave plus a few repeats on the next
+    //     polls, background processes only.
     //  7. Revival stays: START_STICKY, 60s alarm
     //     restart on destroy, BOOT_COMPLETED +
     //     MY_PACKAGE_REPLACED receiver, Home +
@@ -384,6 +454,7 @@ class SmartConnectService : Service() {
                 }
                 lastSelectedFg = fg
                 killDoneForLeave = false
+                killRepeatLeft = 0
             }
             lastSeenFg = fg
         }
@@ -399,11 +470,25 @@ class SmartConnectService : Service() {
         // itself (managing settings must not kill the
         // VPN) and SystemUI (notification shade and
         // the recents screen flash through it). An
-        // unknown foreground (null) never disconnects
-        // and never starts the timer, so a usage-stats
-        // lag cannot flap the VPN. A hand-started VPN
-        // is never touched by this.
-        if (fg != null && fg != packageName && fg != "com.android.systemui") {
+        // unknown foreground (null) never starts the
+        // timer, so a usage-stats lag cannot flap the
+        // VPN — but a leave already stamped, followed
+        // by 30s of persistent null/SystemUI absence
+        // (lock, recents left open, idle), DOES cut:
+        // that is a genuine absence, not a blip (see
+        // expireLeave). A hand-started VPN is never
+        // touched by this.
+        if (fg == null || fg == "com.android.systemui") {
+            // Persistent absence (see the comment
+            // above): a stamped leave plus 30s of
+            // null/SystemUI with no selected app
+            // seen since. Transient flashes never
+            // reach this.
+            val leftAt = smartPrefs().getLong("smart_left_at", 0L)
+            if (leftAt != 0L && now0 - leftAt > MINIMIZE_GRACE_MS + PERSISTENT_ABSENCE_MS) {
+                expireLeave()
+            }
+        } else if (fg != packageName) {
             if (selectedApps().contains(fg)) {
                 smartPrefs().edit().remove("smart_last_selected")
                     .putLong("smart_left_at", 0L).apply()
@@ -413,44 +498,33 @@ class SmartConnectService : Service() {
                     smartPrefs().edit().remove("smart_last_selected")
                         .putLong("smart_left_at", now0).apply()
                 } else if (now0 - leftAt > MINIMIZE_GRACE_MS) {
-                    if (smartOwnsVpn()) {
-                        disconnectTarget()
-                        setSmartOwnsVpn(false)
-                    }
-                    // Optional auto-kill (user's
-                    // proposal, OFF by default): the
-                    // user left a selected app for
-                    // good, so kill that app's
-                    // background process — the next
-                    // open is a cold start, the
-                    // effect they got from manually
-                    // force-stopping. True force-stop
-                    // needs a system permission no
-                    // normal app has; this is the
-                    // closest Android allows. Only
-                    // once per leave, and the API
-                    // only kills BACKGROUND processes,
-                    // so a foreground app is safe.
-                    if (smartPrefs().getBoolean("smart_kill_on_close", false) && !killDoneForLeave) {
-                        killDoneForLeave = true
-                        val pkg = lastSelectedFg
-                        if (pkg != null) {
-                            try {
-                                (getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager)
-                                    .killBackgroundProcesses(pkg)
-                            } catch (_: Exception) {}
-                        }
-                    }
-                    smartPrefs().edit().remove("smart_last_selected")
-                        .putLong("smart_left_at", 0L).apply()
+                    expireLeave()
                 }
+            }
+        }
+        // 2.62: repeat the leave-kill on the next few
+        // polls: an app that restarts its own
+        // background process is killed again while the
+        // window lasts. A foreground app is safe: the
+        // API only kills background processes.
+        if (killRepeatLeft > 0) {
+            killRepeatLeft--
+            val pkg = lastSelectedFg
+            if (pkg != null) {
+                try {
+                    (getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager)
+                        .killBackgroundProcesses(pkg)
+                } catch (_: Exception) {}
             }
         }
         // Never connect while ANY VPN is up — ours or
         // another app's — so a hand-started VPN is never
         // disturbed by smart connect.
         if (anyVpnUp()) {
-            if (smartOwnsVpn()) diag(AppLanguage.t(this, "متصل (هوشمند)", "Connected (smart)"))
+            if (smartOwnsVpn()) {
+                val lbl = ownedVpnLabel()
+                diag(if (lbl != null) AppLanguage.t(this, "متصل (هوشمند): $lbl", "Connected (smart): $lbl") else AppLanguage.t(this, "متصل (هوشمند)", "Connected (smart)"))
+            }
             else diag(AppLanguage.t(this, "فیلترشکن دیگری روشن است؛ اتصال هوشمند ساکت است", "Another VPN is on; smart connect stays quiet"))
             return
         }
@@ -466,10 +540,56 @@ class SmartConnectService : Service() {
         // a previous SUCCESS never blocks a reconnect.
         if (fg == lastAttemptPkg && !lastAttemptOk && now - lastAttemptTime < RETRY_MS) return
         lastAttemptPkg = fg
+        lastAttemptLabel = smartAppLabel(fg)
         lastAttemptTime = now
         lastAttemptOk = false
         attemptInFlight = true
         Thread { runConnectAttempt() }.start()
+    }
+
+    /** Shared grace-expiry actions: cut ONLY a
+     *  smart-owned VPN, optionally kill the left
+     *  app's background process once (opt-in), and
+     *  clear the leave stamp. Called from the
+     *  normal grace path and from the persistent-
+     *  absence path. */
+    private fun expireLeave() {
+        if (smartOwnsVpn()) {
+            disconnectTarget()
+            setSmartOwnsVpn(false)
+        }
+        // Optional auto-kill (user's proposal, OFF
+        // by default): the user left a selected app
+        // for good, so kill that app's background
+        // process — the next open is a cold start,
+        // the effect they got from manually
+        // force-stopping. True force-stop needs a
+        // system permission no normal app has; this
+        // is the closest Android allows. Only once
+        // per leave, and the API only kills
+        // BACKGROUND processes, so a foreground app
+        // is safe.
+        if (smartPrefs().getBoolean("smart_kill_on_close", false) && !killDoneForLeave) {
+            killDoneForLeave = true
+            val pkg = lastSelectedFg
+            if (pkg != null) {
+                try {
+                    (getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager)
+                        .killBackgroundProcesses(pkg)
+                } catch (_: Exception) {}
+                // 2.62: the kill is now VISIBLE in the
+                // central log (it used to be silent, so
+                // a kill that fired looked like a kill
+                // that never happened), and it repeats
+                // on the next few polls.
+                killRepeatLeft = 3
+                AppLog.append(this, "smart",
+                    "دستور بستن برنامه «${smartAppLabel(pkg)}» هنگام ترک صادر شد (بستن پردازش پس‌زمینه).",
+                    "Close command for «${smartAppLabel(pkg)}» on leave issued (background-process kill).")
+            }
+        }
+        smartPrefs().edit().remove("smart_last_selected")
+            .putLong("smart_left_at", 0L).apply()
     }
 
     /** Stop whichever target smart connect started.
@@ -478,6 +598,10 @@ class SmartConnectService : Service() {
      *  app reconnects right away. */
     private fun disconnectTarget() {
         setSmartOwnsVpn(false)
+        val dTarget = smartPrefs().getString("smart_target", "v2ray") ?: "v2ray"
+        AppLog.append(this, "smart",
+            "قطع اتصال؛ هدف: ${smartTargetFa(dTarget)}.",
+            "Disconnected; target: $dTarget.")
         // Fresh attempt markers: the next open of a
         // selected app must connect immediately, never
         // wait out the retry guard of the old cycle.
@@ -487,7 +611,16 @@ class SmartConnectService : Service() {
         val target = smartPrefs().getString("smart_target", "v2ray") ?: "v2ray"
         try {
             when (target) {
-                "wireguard" -> WgDirect.disconnect(this)
+                "wireguard", "amnezia" -> WgDirect.disconnect(this)
+                "hydra" -> {
+                    // Only when Hydra is actually
+                    // Smart's session: never stop a
+                    // hand-started Hydra (or anything
+                    // else) from here.
+                    if (HydraService.running || HydraEngine.hydraOwnsVpn()) {
+                        try { HydraService.stop(this) } catch (_: Exception) {}
+                    }
+                }
                 "openvpn" -> {
                     OvpnEngine.disconnect()
                     try {
@@ -496,29 +629,195 @@ class SmartConnectService : Service() {
                     } catch (_: Exception) {}
                     WidgetRefresh.refreshAll(this)
                 }
+                "chain" -> ChainEngine.stopAll(this)
                 // v2ray AND emergency both run on
                 // VpnClientService, so both stop here.
                 else -> {
-                    val stop = Intent(this, VpnClientService::class.java).apply { action = "STOP" }
+                    val stop = Intent(this, VpnClientService::class.java).apply { action = "STOP" ; putExtra("stop_gen", VpnClientService.sessionGen) }
                     try { startService(stop) } catch (_: Exception) {}
-                    try { stopService(Intent(this, VpnClientService::class.java)) } catch (_: Exception) {}
                     VpnClientService.isRunning = false
                     WidgetRefresh.refreshAll(this)
                 }
             }
         } catch (_: Throwable) {}
+        refreshNotif("Watching selected apps")
+    }
+
+    private fun cfFirstLink(): String? = try {
+        val arr = org.json.JSONArray(
+            getSharedPreferences("renamer_cf", MODE_PRIVATE)
+                .getString("cf_results", "[]") ?: "[]")
+        if (arr.length() == 0) null
+        else arr.getJSONObject(0).optString("link").takeIf { it.isNotBlank() }
+    } catch (_: Exception) { null }
+
+    /** 1.96: headless Xray-chain connect for Smart — the
+     *  same config + service start the Chain page uses,
+     *  minus the UI and the VPN-permission prompt (Smart
+     *  only runs after the permission was granted once).
+     *  OpenVPN-hop chains are excluded: they need the
+     *  proxy-core path the Chain page runs in the
+     *  foreground, so they are not offered as a Smart
+     *  target (see targetAvailable). */
+    private fun startChainSmart(): Boolean {
+        return try {
+            val h1 = ChainEngine.hop(this, 1) ?: return false
+            val h2 = ChainEngine.hop(this, 2) ?: return false
+            if (h1.type == "openvpn" || h2.type == "openvpn") return false
+            val cfg = ChainEngine.vpnConfig(this, h1, h2) ?: return false
+            if (!CoreInit.init(applicationContext)) return false
+            if (android.net.VpnService.prepare(this) != null) return false
+            VpnClientService.emergencyConfig = null
+            val chainName = AppLanguage.t(this, "زنجیره دوتایی", "Double chain")
+            val intent = Intent(this, VpnClientService::class.java).apply {
+                putExtra("config", cfg)
+                putExtra("name", chainName)
+                putExtra("session_tag", "chain")
+            }
+            startService(intent)
+            ChainEngine.setRunning(this, "xray")
+            true
+        } catch (_: Exception) { false }
     }
 
     private fun runConnectAttempt() {
-        // Double-check at attempt time: never connect
-        // over a VPN that is already up.
+        // 2.43: central log wraps the attempt: the
+        // attempt line (app + target) here, the
+        // outcome line in finally (every branch
+        // returns early, but finally always runs).
+        // A VPN already up is not an attempt at all,
+        // so it returns before any log line.
         if (anyVpnUp()) {
             attemptInFlight = false
             return
         }
+        smartLogAttempt()
+        try { runConnectAttemptInner() } finally { smartLogOutcome() }
+    }
+
+    /** 2.43: app label for the central log. */
+    private fun smartAppLabel(pkg: String?): String {
+        if (pkg.isNullOrBlank()) return "؟"
+        return try {
+            val ai = packageManager.getApplicationInfo(pkg, 0)
+            packageManager.getApplicationLabel(ai)?.toString()?.takeIf { it.isNotBlank() } ?: pkg
+        } catch (_: Exception) { pkg }
+    }
+
+    /** 2.43: target code -> display name. */
+    private fun smartTargetFa(t: String): String = when (t) {
+        "wireguard" -> "وایرگارد"
+        "amnezia" -> "امنزیا"
+        "openvpn" -> "OpenVPN"
+        "hydra" -> "هیدرا"
+        "cloudflare" -> "کلادفلر"
+        "chain" -> "زنجیره"
+        "emergency" -> "اضطراری"
+        else -> "v2ray"
+    }
+
+    private fun smartLogAttempt() {
+        val target = smartPrefs().getString("smart_target", "v2ray") ?: "v2ray"
+        val app = lastAttemptLabel ?: smartAppLabel(lastAttemptPkg)
+        val eng = if (target == "v2ray" || target == "emergency") {
+            if (AdaptiveEngine.isEnabled(this)) "؛ موتور هوشمند: روشن" else "؛ موتور هوشمند: خاموش"
+        } else ""
+        val engEn = if (target == "v2ray" || target == "emergency") {
+            if (AdaptiveEngine.isEnabled(this)) "; smart engine: ON" else "; smart engine: OFF"
+        } else ""
+        AppLog.append(this, "smart",
+            "تلاش اتصال خودکار؛ برنامه: $app؛ هدف: ${smartTargetFa(target)}$eng.",
+            "Auto-connect attempt; app: $app; target: $target$engEn.")
+    }
+
+    private fun smartLogOutcome() {
+        val target = smartPrefs().getString("smart_target", "v2ray") ?: "v2ray"
+        val app = lastAttemptLabel ?: smartAppLabel(lastAttemptPkg)
+        val conn = ownedVpnLabel()
+        if (lastAttemptOk) {
+            AppLog.append(this, "smart",
+                "وصل شد؛ برنامه: $app؛ هدف: ${smartTargetFa(target)}" + (if (conn != null) "؛ اتصال: $conn." else "."),
+                "Connected; app: $app; target: $target" + (if (conn != null) "; connection: $conn." else "."))
+            // 2.45: background real-connection check
+            // for smart sessions (v2ray/emergency via
+            // socks, openvpn via exit IP; wireguard /
+            // chain / hydra / cloudflare have no probe
+            // here — their page/engine triggers cover
+            // manual connects).
+            val sName = VpnClientService.currentName ?: conn ?: "؟"
+            when (target) {
+                "v2ray", "emergency" -> {
+                    // Probe through the RUNNING session's real SOCKS
+                    // port first (the 2.53 fix, which this call had missed).
+                    val sessionPort = VpnClientService.sessionSocksPort.takeIf { it > 0 }
+                    if (sessionPort != null) {
+                                            }
+                    ConnVerify.verifyXray(this, "v2ray", "smart", sName, sessionPort ?: VpnConfigBuilder.socksPort(this)) { VpnClientService.isRunning }
+                }
+                "openvpn" -> ConnVerify.verifyOvpn(this, "openvpn", "smart", sName) { OvpnEngine.isConnected }
+            }
+        } else {
+            // Failure reason: the service's latest
+            // diag, but only when it was written
+            // during THIS attempt (older diags are
+            // stale and must never be blamed).
+            val reason = smartPrefs().getString("diag_attempt", null)
+            val reasonAt = smartPrefs().getLong("diag_attempt_at", 0L)
+            val fresh = reason != null && reasonAt >= lastAttemptTime
+            AppLog.append(this, "smart",
+                "وصل نشد؛ برنامه: $app؛ هدف: ${smartTargetFa(target)}" + (if (fresh) "؛ علت: $reason." else "."),
+                "Did not connect; app: $app; target: $target" + (if (fresh) "; reason: $reason." else "."))
+        }
+    }
+
+    private fun runConnectAttemptInner() {
         // Non-v2ray targets: WireGuard / OpenVPN, same
         // trigger (a selected app opened), same guards.
         val target = smartPrefs().getString("smart_target", "v2ray") ?: "v2ray"
+        // 1.96: Cloudflare target — the first config
+        // built in the Cloudflare section, connected
+        // through the normal v2ray path (its session
+        // name is already "Cloudflare - country").
+        if (target == "cloudflare") {
+            val link = cfFirstLink()
+            if (link != null && startVpnConfig(link)) {
+                // do not report success until the tunnel is really up.
+                val deadline = System.currentTimeMillis() + 8000
+                while (System.currentTimeMillis() < deadline) {
+                    if (VpnClientService.isRunning) break
+                    Thread.sleep(500)
+                }
+                if (VpnClientService.isRunning) {
+                    setSmartOwnsVpn(true)
+                    lastAttemptOk = true
+                } else {
+                                        diag(AppLanguage.t(this, "کلادفلر وصل نشد", "Cloudflare did not connect"))
+                }
+            }
+            attemptInFlight = false
+            return
+        }
+        // 1.96: Chain target — headless Xray chain
+        // (see startChainSmart). Disconnect is the
+        // "chain" branch of the stop dispatch.
+        if (target == "chain") {
+            if (startChainSmart()) {
+                // do not report success until the tunnel is really up.
+                val deadline = System.currentTimeMillis() + 8000
+                while (System.currentTimeMillis() < deadline) {
+                    if (VpnClientService.isRunning) break
+                    Thread.sleep(500)
+                }
+                if (VpnClientService.isRunning) {
+                    setSmartOwnsVpn(true)
+                    lastAttemptOk = true
+                } else {
+                                        diag(AppLanguage.t(this, "زنجیره وصل نشد", "Chain did not connect"))
+                }
+            }
+            attemptInFlight = false
+            return
+        }
         // Emergency target: the emergency section's
         // own engine, headless — fetch fresh, ping,
         // connect to the best, same privacy rules
@@ -532,7 +831,9 @@ class SmartConnectService : Service() {
                     if (EmergencyConnect.connect(this)) {
                         setSmartOwnsVpn(true)
                         lastAttemptOk = true
-                        diag(AppLanguage.t(this, "متصل شد (اضطراری)", "Connected (emergency)"))
+                        val emMsg = AppLanguage.t(this, "متصل شد (اضطراری)", "Connected (emergency)")
+                        diag(emMsg)
+                        refreshNotif(emMsg)
                     } else diag(AppLanguage.t(this, "اضطراری: سرور سالمی پیدا نشد", "Emergency: no healthy server found"))
                 } else diag(AppLanguage.t(this, "مجوز VPN ثبت نشده؛ یک بار دستی وصل شو", "VPN permission not granted yet; connect once manually"))
             } catch (_: Throwable) {}
@@ -554,22 +855,61 @@ class SmartConnectService : Service() {
                 // their tunnel.
                 if (!WgDirect.connectFirstOrActive(this)) {
                     if (WgDirect.activeConf(this) == null && WgDirect.firstConf(this) == null)
-                        diag(AppLanguage.t(this, "WireGuard: تونلی در بخش وایرگارد نیست؛ اول یک تونل اضافه کن", "WireGuard: no tunnel in the WireGuard section; add one first"))
+                        diag(AppLanguage.t(this, "وایرگارد و امنزیا: تونلی در این بخش نیست؛ اول یک تونل اضافه کن", "WireGuard & Amnezia: no tunnel in this section; add one first"))
                     else if (android.net.VpnService.prepare(this) != null)
                         diag(AppLanguage.t(this, "مجوز VPN ثبت نشده؛ یک بار دستی وصل شو", "VPN permission not granted yet; connect once manually"))
                     else diag(AppLanguage.t(this, "WireGuard وصل نشد", "WireGuard did not connect"))
                 } else {
-                    // Wait up to 8s for the tunnel to come up.
+                    // Wait up to 8s for the tunnel to come up
+                    // (ground truth: a live GoBackend
+                    // tunnel, never the stale pref).
                     val deadline = System.currentTimeMillis() + 8000
                     while (System.currentTimeMillis() < deadline) {
-                        if (WgDirect.isUp(this)) break
+                        if (WgDirect.isLive(this)) break
                         Thread.sleep(500)
                     }
-                    if (WgDirect.isUp(this)) {
+                    if (WgDirect.isLive(this)) {
                         setSmartOwnsVpn(true)
                         lastAttemptOk = true
-                        diag(AppLanguage.t(this, "متصل شد (WireGuard)", "Connected (WireGuard)"))
+                        val wgName = WgDirect.activeConf(this)?.first
+                        val wgMsg = if (wgName != null) AppLanguage.t(this, "متصل شد (WireGuard): $wgName", "Connected (WireGuard): $wgName") else AppLanguage.t(this, "متصل شد (WireGuard)", "Connected (WireGuard)")
+                        diag(wgMsg)
+                        refreshNotif(wgMsg)
                     } else diag(AppLanguage.t(this, "WireGuard وصل نشد", "WireGuard did not connect"))
+                }
+            } catch (_: Throwable) {}
+            attemptInFlight = false
+            return
+        }
+        if (target == "amnezia") {
+            try {
+                // Mirror of the wireguard branch, but
+                // Amnezia tunnels only: the saved active
+                // tunnel when it is an Amnezia config,
+                // else the first saved Amnezia tunnel.
+                if (!WgDirect.connectFirstOrActiveAwg(this)) {
+                    if (WgDirect.firstAwgConf(this) == null)
+                        diag(AppLanguage.t(this, "امنزیا: تونلی در این بخش نیست؛ اول یک تونل امنزیا اضافه کن", "AmneziaWG: no Amnezia tunnel in this section; add one first"))
+                    else if (android.net.VpnService.prepare(this) != null)
+                        diag(AppLanguage.t(this, "مجوز VPN ثبت نشده؛ یک بار دستی وصل شو", "VPN permission not granted yet; connect once manually"))
+                    else diag(AppLanguage.t(this, "امنزیا وصل نشد", "AmneziaWG did not connect"))
+                } else {
+                    // Wait up to 8s for the tunnel to come up
+                    // (ground truth: a live backend
+                    // tunnel, never the stale pref).
+                    val deadline = System.currentTimeMillis() + 8000
+                    while (System.currentTimeMillis() < deadline) {
+                        if (WgDirect.isLive(this)) break
+                        Thread.sleep(500)
+                    }
+                    if (WgDirect.isLive(this)) {
+                        setSmartOwnsVpn(true)
+                        lastAttemptOk = true
+                        val awgName = WgDirect.activeConf(this)?.first
+                        val awgMsg = if (awgName != null) AppLanguage.t(this, "متصل شد (امنزیا): $awgName", "Connected (AmneziaWG): $awgName") else AppLanguage.t(this, "متصل شد (امنزیا)", "Connected (AmneziaWG)")
+                        diag(awgMsg)
+                        refreshNotif(awgMsg)
+                    } else diag(AppLanguage.t(this, "امنزیا وصل نشد", "AmneziaWG did not connect"))
                 }
             } catch (_: Throwable) {}
             attemptInFlight = false
@@ -596,19 +936,103 @@ class SmartConnectService : Service() {
                         OvpnEngine.pendingProfile3 = prof
                         OvpnEngine.activeName = prof.name
                         try { startService(android.content.Intent(this, Ovpn3VpnService::class.java)) } catch (_: Exception) {}
-                        getSharedPreferences("renamer_widget", MODE_PRIVATE)
-                            .edit().putBoolean("widget_state_openvpn", true).apply()
-                        setSmartOwnsVpn(true)
-                        lastAttemptOk = true
-                        diag(AppLanguage.t(this, "متصل شد (OpenVPN)", "Connected (OpenVPN)"))
-                        WidgetRefresh.refreshAll(this)
+                        // do not report success until CONNECTED is real.
+                        val deadline = System.currentTimeMillis() + 8000
+                        while (System.currentTimeMillis() < deadline) {
+                            if (OvpnEngine.isConnected) break
+                            Thread.sleep(500)
+                        }
+                        if (OvpnEngine.isConnected) {
+                            getSharedPreferences("renamer_widget", MODE_PRIVATE)
+                                .edit().putBoolean("widget_state_openvpn", true).apply()
+                            setSmartOwnsVpn(true)
+                            lastAttemptOk = true
+                            val ovMsg = AppLanguage.t(this, "متصل شد (OpenVPN): ${prof.name}", "Connected (OpenVPN): ${prof.name}")
+                            diag(ovMsg)
+                            refreshNotif(ovMsg)
+                            WidgetRefresh.refreshAll(this)
+                        } else {
+                                                        diag(AppLanguage.t(this, "OpenVPN وصل نشد", "OpenVPN did not connect"))
+                        }
                     } else diag(AppLanguage.t(this, "OpenVPN: پروفایلی پیدا نشد", "OpenVPN: no profile found"))
                 }
             } catch (_: Throwable) {}
             attemptInFlight = false
             return
         }
+        if (target == "hydra") {
+            try {
+                if (!HydraService.running) {
+                    if (android.net.VpnService.prepare(this) != null) {
+                        diag(AppLanguage.t(this, "مجوز VPN ثبت نشده؛ یک بار دستی وصل شو", "VPN permission not granted yet; connect once manually"))
+                    } else {
+                        // No takeover here: Smart must
+                        // never disturb a hand-started
+                        // VPN, and pollOnce already
+                        // ensured none is up. Hydra's
+                        // own probe gate steps aside
+                        // if one appears mid-probe.
+                        HydraService.start(this, takeover = false)
+                        setSmartOwnsVpn(true)
+                        lastAttemptOk = true
+                        val hm = AppLanguage.t(this, "هیدرا در حال چشیدن و وصل شدن…", "Hydra is probing and connecting…")
+                        diag(hm)
+                        refreshNotif(hm)
+                    }
+                }
+                // else: Hydra already running (possibly
+                // hand-started): Smart claims nothing
+                // and touches nothing.
+            } catch (_: Throwable) {}
+            attemptInFlight = false
+            return
+        }
         try {
+            // ADAPTIVE ENGINE (1.78), selector-only
+            // pre-step. REGRESSION GUARD: this changes
+            // NOTHING about Smart's invariants — it
+            // only tries to improve WHICH config gets
+            // connected, and only when the engine is
+            // on. It never overwrites the saved
+            // "selected" config, never sets ownership
+            // except through the normal success path
+            // below, and on any no-win or failure
+            // execution falls through to the exact
+            // old logic (fast path, then best-ping).
+            if (AdaptiveEngine.isEnabled(this)) {
+                try {
+                    val vpnPrefsE = vpnPrefs()
+                    val serversE = vpnPrefsE.getString("servers", "")?.lines()
+                        ?.filter { it.isNotBlank() } ?: emptyList()
+                    val lastE = vpnPrefsE.getString("selected", null)?.takeIf { it.isNotBlank() }
+                    if (lastE != null && serversE.contains(lastE) && !XraySpeedtest.isGroup(lastE)) {
+                        // Smart finally gets a real pool — persisted
+                        // healthy delays plus the subscription healthy list —
+                        // so the jump/chain waves are no longer always skipped.
+                        val smartPool = (AdaptiveEngine.persistedPool(this, serversE) +
+                            AdaptiveEngine.lastHealthyLinks(this))
+                            .distinctBy { XraySpeedtest.dedupKey(it) }
+                        if (smartPool.isNotEmpty()) {
+                                                    }
+                        val plan = AdaptiveEngine.selectV2ray(this, lastE, AdaptiveEngine.S_SMART, 12000, smartPool)
+                        if (plan != null && startVpnConfig(plan.link, plan, lastE)) {
+                            val deadline = System.currentTimeMillis() + FAST_PATH_WAIT_MS
+                            while (System.currentTimeMillis() < deadline) {
+                                if (VpnClientService.isRunning) {
+                                    setSmartOwnsVpn(true)
+                                    lastAttemptOk = true
+                                    val eMsg = AppLanguage.t(this, "متصل شد (موتور هوشمند): ", "Connected (Smart Engine): ") + XraySpeedtest.displayName(plan.link)
+                                    diag(eMsg)
+                                    refreshNotif(eMsg)
+                                    attemptInFlight = false
+                                    return
+                                }
+                                Thread.sleep(500)
+                            }
+                        }
+                    }
+                } catch (_: Throwable) {}
+            }
             // --- Step 1: fast path, last connected config.
             val vpnPrefs = vpnPrefs()
             val servers = vpnPrefs.getString("servers", "")?.lines()
@@ -624,7 +1048,9 @@ class SmartConnectService : Service() {
                     if (VpnClientService.isRunning) {
                         setSmartOwnsVpn(true)
                         lastAttemptOk = true
-                        diag(AppLanguage.t(this, "متصل شد: ", "Connected: ") + XraySpeedtest.displayName(last ?: ""))
+                        val fMsg = AppLanguage.t(this, "متصل شد: ", "Connected: ") + XraySpeedtest.displayName(last ?: "")
+                        diag(fMsg)
+                        refreshNotif(fMsg)
                         attemptInFlight = false
                         return
                     }
@@ -691,6 +1117,9 @@ class SmartConnectService : Service() {
                             if (VpnClientService.isRunning) {
                                 setSmartOwnsVpn(true)
                                 lastAttemptOk = true
+                                val bMsg = AppLanguage.t(this, "متصل شد: ", "Connected: ") + XraySpeedtest.displayName(chosen)
+                                diag(bMsg)
+                                refreshNotif(bMsg)
                                 break
                             }
                             Thread.sleep(500)
@@ -718,7 +1147,7 @@ class SmartConnectService : Service() {
      *  non-null Intent, which only an Activity can show).
      *  The caller checks VpnClientService.isRunning to
      *  confirm the VPN actually came up. */
-    private fun startVpnConfig(cfg: String): Boolean {
+    private fun startVpnConfig(cfg: String, plan: AdaptiveEngine.Plan? = null, origLink: String? = null): Boolean {
         return try {
             // Direct connect, exactly as the last
             // version where smart connect worked
@@ -739,9 +1168,13 @@ class SmartConnectService : Service() {
                 diag(AppLanguage.t(this, "ساخت کانفیگ ناموفق", "Config build failed"))
                 return false
             }
+            // ADAPTIVE ENGINE (1.78): one-shot plan
+            // (fragment injection); null plan =
+            // unchanged, exactly the old behavior.
+            val builtE = AdaptiveEngine.applyPlanToBuiltJson(this, built, plan, true) ?: built
             val vpnConfig = if (mode == "Resolve only") {
-                VpnConfigBuilder.applyResolvedIp(built, resolved)
-            } else built
+                VpnConfigBuilder.applyResolvedIp(builtE, resolved)
+            } else builtE
             if (!CoreInit.init(applicationContext)) {
                 diag(AppLanguage.t(this, "آماده‌سازی هسته ناموفق", "Core init failed"))
                 return false
@@ -757,6 +1190,12 @@ class SmartConnectService : Service() {
                 putExtra("name", XraySpeedtest.displayName(cfg))
                 putExtra("link", effective)
                 putExtra("session_tag", "smart")
+                // ADAPTIVE ENGINE (1.79): mark the
+                // session for the service watchdog.
+                if (plan != null && origLink != null) {
+                    putExtra("engine_session", true)
+                    putExtra("engine_orig_link", origLink)
+                }
             }
             VpnClientService.emergencyConfig = null
             startService(intent)

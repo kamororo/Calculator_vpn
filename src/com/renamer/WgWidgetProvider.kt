@@ -8,7 +8,7 @@ package com.renamer
 class WgWidgetProvider : WidgetProviderBase() {
     override fun sectionKey(): String = "wireguard"
     override fun sectionInitial(): String = "W"
-    override fun sectionDisplayName(): String = "WireGuard"
+    override fun sectionDisplayName(): String = "وایرگارد و امنزیا"
     override fun iconRes(): Int = R.drawable.widget_icon_wireguard
     override fun targetActivity(): Class<*> = WireGuardActivity::class.java
 }

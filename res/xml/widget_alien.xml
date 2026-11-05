@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2.27 Alien Message widget provider: shows the
+     latest received message; tapping opens the
+     receiver page. Updated on demand (never on a
+     timer) whenever a new message arrives. -->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="180dp"
+    android:minHeight="70dp"
+    android:minResizeWidth="180dp"
+    android:minResizeHeight="70dp"
+    android:updatePeriodMillis="0"
+    android:initialLayout="@layout/widget_alien"
+    android:resizeMode="horizontal|vertical"
+    android:widgetCategory="home_screen" />

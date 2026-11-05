@@ -1,17 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 1x1 widget: one big circular connect/disconnect button only.
-     RemoteViews-supported views only. Ids: widget_btn. -->
+<!-- 2.17 1x1 widget: one glass orb button only, on a translucent glass card.
+     RemoteViews-supported views only. Ids: widget_btn, widget_icon. -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:id="@+id/widget_root"
     android:background="@drawable/widget_bg"
     android:gravity="center"
     android:orientation="vertical"
     android:padding="8dp">
 
     <FrameLayout
-        android:layout_width="48dp"
-        android:layout_height="48dp">
+        android:layout_width="56dp"
+        android:layout_height="56dp">
 
         <TextView
             android:id="@+id/widget_btn"

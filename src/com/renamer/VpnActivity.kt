@@ -45,6 +45,21 @@ class VpnActivity : Activity() {
     private lateinit var connectBtn: Button
     private lateinit var listContainer: LinearLayout
     private lateinit var tabBar: LinearLayout
+    private lateinit var addBtn: Button
+    private lateinit var menuBtn: Button
+    private var dragFrom = -1
+    // FAB blink: soft neon, every 1.5s, ring only — the
+    // stroke alternates between its color and a lighter
+    // shade (see refreshFab).
+    private var fabBlinkLight = false
+    private val fabBlinkRunnable = object : Runnable {
+        override fun run() {
+            fabBlinkLight = !fabBlinkLight
+            fabGlassUntil = 0
+            refreshFab()
+            handler.postDelayed(this, 1500)
+        }
+    }
     // "" = All configs (the default tab); otherwise a
     // sub URL, or a "GROUP::..." header when the
     // show-all-groups setting adds group tabs.
@@ -85,7 +100,161 @@ class VpnActivity : Activity() {
     private fun L(fa: String, en: String): String = AppLanguage.t(this, fa, en)
     private var servers: MutableList<String> = mutableListOf()
     private var selected: String? = null
+    // ADAPTIVE ENGINE (1.78) state: the winning
+    // variant for this one tap. One-shot: startVpn
+    // consumes engineLink, doStartVpn consumes
+    // enginePlan, so a later tap can never reuse a
+    // stale variant.
+    private var engineLink: String? = null
+    private var enginePlan: AdaptiveEngine.Plan? = null
+    // ADAPTIVE ENGINE (1.82): fallback no-fake-connected check.
+    // Set when the engine found NO win and the normal connect runs
+    // anyway; the check stops a dead "connected" session instead
+    // of leaving it up. Token cancels stale checks on disconnect.
+    private var pendingFallbackCheck = false
+    // 2.39: guards a running engine check (a second
+    // tap during the 90s run used to start a
+    // parallel run, interleaving wave lines in
+    // the report) and remembers whether the
+    // session being checked was an engine WIN.
+    private var engineRunActive = false
+    // 2.43: central-log attempt context, consumed
+    // once by the refreshStatus connected/error
+    // one-shots. The name is kept for the session
+    // so the dead-traffic stop can name it too.
+    private var appLogPending = false
+    private var appLogName = ""
+    private var appLogType = ""
+    private var appLogEngineOn = false
+    private var appLogMode = ""
+    private var appLogNoteFa = ""
+    private var appLogNoteEn = ""
+
+    /** 2.43: record a v2ray attempt (engine state,
+     *  mode, type, winning method when there is
+     *  one) and arm the one-shot outcome logs. */
+    /** 2.45: a config's last measured ping (page
+     *  map first, then the ping service's persisted
+     *  ping_delays map). Null = never measured;
+     *  -1 = failed in the last test. */
+    private fun persistedPingMs(cfg: String): Long? {
+        return try {
+            val j = org.json.JSONObject(getSharedPreferences("renamer_subs", MODE_PRIVATE).getString("ping_delays", "{}") ?: "{}")
+            val k = XraySpeedtest.dedupKey(cfg)
+            if (j.has(k)) j.optLong(k) else null
+        } catch (_: Exception) { null }
+    }
+
+    private fun appLogBegin(cfg: String, engineOn: Boolean, plan: AdaptiveEngine.Plan?) {
+        testLogConnectFixes(cfg)
+        appLogName = XraySpeedtest.displayName(cfg)
+        appLogType = AppLog.cfgType(this, cfg)
+        appLogEngineOn = engineOn
+        appLogMode = connectMode()
+        appLogNoteFa = plan?.noteFa ?: ""
+        appLogNoteEn = plan?.noteEn ?: ""
+        appLogPending = true
+        val engFa = if (engineOn) "موتور هوشمند: روشن" else "موتور هوشمند: خاموش"
+        val engEn = if (engineOn) "Smart engine: ON" else "Smart engine: OFF"
+        val modeFa = if (appLogMode == "best") "بهترین پینگ" else "عادی"
+        val modeEn = if (appLogMode == "best") "best ping" else "normal"
+        val noteFa = if (plan != null) "؛ روش برنده: ${plan.noteFa}" else if (engineOn) "؛ هیچ روشی برنده نشد؛ اتصال عادی" else ""
+        val noteEn = if (plan != null) "; winning method: ${plan.noteEn}" else if (engineOn) "; no method won; normal connect" else ""
+        // 2.45: the config's last ping, so the log
+        // shows whether its ping test had answered.
+        val pingMs = pingMap[XraySpeedtest.dedupKey(cfg)] ?: persistedPingMs(cfg)
+        val pingFa = when {
+            pingMs != null && pingMs >= 0 -> "؛ پینگ: $pingMs میلی‌ثانیه"
+            pingMs != null -> "؛ پینگ: در آخرین تست ناموفق بود"
+            else -> "؛ پینگ: اندازه‌گیری نشده"
+        }
+        val pingEn = when {
+            pingMs != null && pingMs >= 0 -> "; ping: $pingMs ms"
+            pingMs != null -> "; ping: failed in the last test"
+            else -> "; ping: not measured"
+        }
+        AppLog.append(this, "v2ray",
+            "تلاش اتصال «$appLogName»؛ نوع: $appLogType؛ $engFa؛ حالت: $modeFa$noteFa$pingFa.",
+            "Connect attempt “$appLogName”; type: $appLogType; $engEn; mode: $modeEn$noteEn$pingEn.")
+    }
+
+    /** 2.43: outcome line for the armed attempt. */
+    private fun appLogEvent(suffixFa: String, suffixEn: String) {
+        val engFa = if (appLogEngineOn) "موتور هوشمند: روشن" else "موتور هوشمند: خاموش"
+        val engEn = if (appLogEngineOn) "Smart engine: ON" else "Smart engine: OFF"
+        val modeFa = if (appLogMode == "best") "بهترین پینگ" else "عادی"
+        val modeEn = if (appLogMode == "best") "best ping" else "normal"
+        val noteFa = if (appLogNoteFa.isNotBlank()) "؛ روش: $appLogNoteFa" else ""
+        val noteEn = if (appLogNoteEn.isNotBlank()) "; method: $appLogNoteEn" else ""
+        AppLog.append(this, "v2ray",
+            "«$appLogName»؛ نوع: $appLogType؛ $engFa؛ حالت: $modeFa$noteFa؛ $suffixFa",
+            "“$appLogName”; type: $appLogType; $engEn; mode: $modeEn$noteEn; $suffixEn")
+    }
+
+    /** 2.43: the refreshStatus connected one-shot,
+     *  for this page's own sessions only (smart
+     *  sessions are logged by the service). */
+    private fun appLogConnected() {
+        if (!appLogPending) return
+        val tag = VpnClientService.sessionTag
+        if (ProxyOnlyService.isRunning && !VpnClientService.isRunning) {
+            appLogEvent("وصل شد (حالت فقط پروکسی)", "connected (proxy-only mode)")
+        } else if (tag == "v2ray") {
+            appLogEvent("وصل شد", "connected")
+            // 2.45: background real-connection check
+            // (only when its toggle is ON).
+            ConnVerify.verifyXray(this, "v2ray", "v2ray", VpnClientService.currentName ?: appLogName, VpnClientService.sessionSocksPort.takeIf { it > 0 } ?: VpnConfigBuilder.socksPort(this)) { VpnClientService.isRunning && VpnClientService.sessionTag == "v2ray" }
+        } else {
+            return
+        }
+        appLogPending = false
+    }
+    private var pendingWonCheck = false
+    private var pendingWonLink: String? = null
+    private var fallbackCheckToken = 0L
+    private var engineReportRow: LinearLayout? = null
     private val pingMap = mutableMapOf<String, Long>()
+    // CLOUDFLARE imports (1.94): dedupKey -> country code, read
+    // from the Cloudflare section's prefs at refreshList(). Rows
+    // for those configs show a Cloudflare label, a soft galaxy
+    // tint, a name in the current language, and a flag that
+    // alternates every 2s between the country flag and the
+    // Cloudflare section icon.
+    private var cfMap: Map<String, String> = emptyMap()
+    private val cfFlagViews = mutableListOf<Triple<android.widget.ImageView, android.graphics.Bitmap, android.graphics.Bitmap>>()
+    // 2.26 alien imports: dedupKeys transferred
+    // from the Alien Language section, plus the
+    // alternating alien/flag circles (same 2s
+    // trick as Cloudflare's flag/cloud circle).
+    private var alienSet: Set<String> = emptySet()
+    private val alienFlagViews = mutableListOf<AlienFlagState>()
+    private var alienFlagShowAlien = true
+    private var alienBitmapCache: android.graphics.Bitmap? = null
+    private class AlienFlagState(val alienBmp: android.graphics.Bitmap, var flagBmp: android.graphics.Bitmap) {
+        lateinit var view: android.widget.ImageView
+        var country: String = ""
+        var city: String = ""
+    }
+    private val alienFlagToggle = object : Runnable {
+        override fun run() {
+            alienFlagShowAlien = !alienFlagShowAlien
+            for (h in alienFlagViews) {
+                try { h.view.setImageBitmap(if (alienFlagShowAlien) h.alienBmp else h.flagBmp) } catch (_: Exception) {}
+            }
+            handler.postDelayed(this, 2000)
+        }
+    }
+    private var cfFlagShowCloud = false
+    private var cfCloudBitmap: android.graphics.Bitmap? = null
+    private val cfFlagToggle = object : Runnable {
+        override fun run() {
+            cfFlagShowCloud = !cfFlagShowCloud
+            for ((view, flagBmp, cloudBmp) in cfFlagViews) {
+                view.setImageBitmap(if (cfFlagShowCloud) cloudBmp else flagBmp)
+            }
+            handler.postDelayed(this, 2000)
+        }
+    }
     private var coreInitDone = false
     // Bottom status panel (v2rayNG-style): live
     // progress + short history lines, fixed at the
@@ -133,11 +302,54 @@ class VpnActivity : Activity() {
         topRow.addView(glassTopButton("☰") { toggleDrawer() })
         topRow.addView(TextView(this).apply {
             text = "v2ray"; textSize = 22f
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            letterSpacing = 0.05f
+            setTextColor(Color.BLACK)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                setMargins((12 * resources.displayMetrics.density).toInt(), 0, 0, 0)
+            }
         })
-        topRow.addView(glassTopButton("+") { showAddMenu() })
-        topRow.addView(glassTopButton("⋮") { showMainMenu() })
+        addBtn = glassTopButton("+") { showAddMenu() }
+        topRow.addView(addBtn)
+        menuBtn = glassTopButton("⋮") { showMainMenu() }
+        topRow.addView(menuBtn)
         root.addView(topRow)
+        // ADAPTIVE ENGINE (1.78): minimal report
+        // button, visible only while the engine is
+        // on (visibility refreshed in onResume).
+        engineReportRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            visibility = if (AdaptiveEngine.isEnabled(this@VpnActivity)) View.VISIBLE else View.GONE
+        }
+        engineReportRow?.addView(AdaptiveEngine.reportButton(this, AdaptiveEngine.S_V2RAY))
+        // ADAPTIVE ENGINE (1.79): batch repair, same
+        // row (so it hides with the row when the
+        // engine is off). Dead configs are checked
+        // one by one and repaired copies are saved
+        // only after the user confirms.
+        engineReportRow?.addView(Button(this).apply {
+            text = AppLanguage.t(this@VpnActivity, "تعمیر دسته‌ای", "Batch repair")
+            textSize = 13f
+            isAllCaps = false
+            setTextColor(Color.parseColor("#0D47A1"))
+            background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadius = 48f
+                setColor(Color.parseColor("#E3F2FD"))
+                setStroke(2, Color.parseColor("#90CAF9"))
+            }
+            val d = resources.displayMetrics.density
+            setPadding((16 * d).toInt(), (8 * d).toInt(), (16 * d).toInt(), (8 * d).toInt())
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                leftMargin = (8 * d).toInt()
+            }
+            setOnClickListener { onBatchRepair() }
+        })
+        root.addView(engineReportRow)
 
         // No status line at the top anymore (the user's
         // word): the FAB itself shows connected /
@@ -154,9 +366,9 @@ class VpnActivity : Activity() {
             setBackgroundColor(Color.parseColor("#DDDDDD"))
         })
 
-        root.addView(TextView(this).apply {
-            text = L("سرورها", "Servers"); textSize = 18f; setPadding(0, 16, 0, 8)
-        })
+        // «سرورها» header removed at the user's
+        // request (1.79): the page opens straight
+        // into the tabs + list.
         // Subscription tab bar (v2rayNG-style): "All
         // configs" first and default, then one tab per
         // subscription (name + count). Tapping a tab
@@ -170,11 +382,12 @@ class VpnActivity : Activity() {
         tabScroll.addView(tabBar)
         root.addView(tabScroll)
         listContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        // A little air between the tab bar and the first config.
+        listContainer.layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { setMargins(0, (12 * resources.displayMetrics.density).toInt(), 0, 0) }
         root.addView(listContainer)
-        root.addView(Button(this).apply {
-            text = L("بازگشت", "Back")
-            setOnClickListener { finish() }
-        })
         // The drawer, like v2rayNG's side menu: now a WHITE
         // panel. A transparent scrim covers the rest of the
         // page while it is open, so tapping outside the
@@ -184,6 +397,7 @@ class VpnActivity : Activity() {
         val frame = android.widget.FrameLayout(this)
         frameView = frame
         frame.addView(scroll)
+
         drawerScrim = View(this).apply {
             layoutParams = android.widget.FrameLayout.LayoutParams(
                 android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
@@ -201,15 +415,24 @@ class VpnActivity : Activity() {
             setPadding(32, 48, 32, 32)
             visibility = View.GONE
             layoutParams = android.widget.FrameLayout.LayoutParams(
-                (300 * resources.displayMetrics.density).toInt(),
+                (240 * resources.displayMetrics.density).toInt(),
                 android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
                 Gravity.START
             )
         }
-        drawerPanel.addView(TextView(this).apply {
-            text = "v2rayNG"; textSize = 26f
-            setTextColor(Color.BLACK)
-            setPadding(0, 0, 0, 32)
+        // The v2ray icon from the home page, small, instead
+        // of the "v2rayNG" text (user order).
+        drawerPanel.addView(android.widget.ImageView(this).apply {
+            try {
+                setImageBitmap(
+                    android.graphics.BitmapFactory.decodeStream(assets.open("vpn.png"))
+                )
+            } catch (_: Exception) {
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                (48 * resources.displayMetrics.density).toInt(),
+                (48 * resources.displayMetrics.density).toInt()
+            ).apply { setMargins(0, 0, 0, 16) }
         })
         val drawerItems = listOf(
             L("تنظیمات گروه سابسکریبشن", "Subscription group setting") to { showSubGroupSetting() },
@@ -226,10 +449,14 @@ class VpnActivity : Activity() {
             L("درباره", "About") to { showAbout() }
         )
         for ((label, action) in drawerItems) {
-            drawerPanel.addView(glassMenuButton(label) {
+            val itemBtn = glassMenuButton(label) {
                 closeDrawer()
                 action()
-            })
+            }
+            // One line per option, never wrapped to two.
+            itemBtn.isSingleLine = true
+            itemBtn.ellipsize = android.text.TextUtils.TruncateAt.END
+            drawerPanel.addView(itemBtn)
         }
         frame.addView(drawerPanel)
         // Dim layer for the connect-mode picker: ~60%
@@ -249,7 +476,7 @@ class VpnActivity : Activity() {
         frame.addView(modeDim)
         // v2rayNG-style FAB: fixed at the bottom-right,
         // above the scrolling list, not inside it.
-        val fabSize = (72 * resources.displayMetrics.density).toInt()
+        val fabSize = (60 * resources.displayMetrics.density).toInt()
         val fabMargin = (24 * resources.displayMetrics.density).toInt()
         connectBtn.setPadding(0, 0, 0, 0)
         setupFabTouch()
@@ -289,7 +516,7 @@ class VpnActivity : Activity() {
             background = android.graphics.drawable.GradientDrawable().apply {
                 shape = android.graphics.drawable.GradientDrawable.RECTANGLE
                 cornerRadius = 24f
-                setColor(Color.WHITE)
+                setColor(Color.parseColor("#E8FFFFFF"))
                 setStroke(2, Color.parseColor("#DDDDDD"))
             }
             visibility = View.GONE
@@ -406,17 +633,32 @@ class VpnActivity : Activity() {
     // rim and a little elevation, so it reads as
     // glass on the pale card. 30dp (was 34dp) and
     // 5dp side gaps, so buttons never touch.
+    private fun lightOval(fill: Int, stroke: Int, widthDp: Float): android.graphics.drawable.Drawable {
+        val d = resources.displayMetrics.density
+        return android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.OVAL
+            setColor(fill)
+            setStroke((widthDp * d).toInt(), stroke)
+        }
+    }
+
+    private fun lightRect(fill: Int, stroke: Int, widthDp: Float, radiusDp: Float): android.graphics.drawable.Drawable {
+        val d = resources.displayMetrics.density
+        return android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+            cornerRadius = radiusDp * d
+            setColor(fill)
+            setStroke((widthDp * d).toInt(), stroke)
+        }
+    }
+
     private fun glassCircleButton(label: String, onClick: () -> Unit): Button {
         val d = resources.displayMetrics.density
         val size = (30 * d).toInt()
         return Button(this).apply {
             text = label; textSize = 14f
             setTextColor(Color.parseColor("#333333"))
-            background = android.graphics.drawable.GradientDrawable().apply {
-                shape = android.graphics.drawable.GradientDrawable.OVAL
-                setColor(Color.parseColor("#E8FFFFFF"))
-                setStroke((1 * d).toInt(), Color.parseColor("#55000000"))
-            }
+            background = lightOval(Color.parseColor("#E8FFFFFF"), Color.parseColor("#55000000"), 1f)
             elevation = 3 * d
             layoutParams = LinearLayout.LayoutParams(size, size).apply {
                 setMargins((5 * d).toInt(), 0, (5 * d).toInt(), 0)
@@ -426,22 +668,21 @@ class VpnActivity : Activity() {
         }
     }
 
-    // The card behind one server row: pale fill, slate
-    // border, generous rounding, like the reference
-    // card. Compact now (8dp vertical padding, 8dp
-    // gap between cards, was 14dp), and the whole
-    // border turns green while the card is selected.
+    // The card behind one server row: dark glass
+    // fill, neon gradient border, generous rounding,
+    // like the reference card. Compact (8dp vertical
+    // padding, 8dp gap between cards), and the whole
+    // border turns bright green while the card is
+    // selected.
     private fun serverCard(isSelected: Boolean = false): LinearLayout {
         val d = resources.displayMetrics.density
-        val border = if (isSelected) "#2E9E5B" else "#4A5A7A"
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = android.graphics.drawable.GradientDrawable().apply {
-                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
-                cornerRadius = 20 * d
-                setColor(Color.parseColor("#F2F5F9"))
-                setStroke((2 * d).toInt(), Color.parseColor(border))
+            background = if (isSelected) {
+                lightRect(Color.parseColor("#F2F5F9"), Color.parseColor("#2E9E5B"), 2f, 20f)
+            } else {
+                lightRect(Color.parseColor("#F2F5F9"), Color.parseColor("#4A5A7A"), 1f, 20f)
             }
             setPadding((12 * d).toInt(), (8 * d).toInt(), (4 * d).toInt(), (8 * d).toInt())
             layoutParams = LinearLayout.LayoutParams(
@@ -456,13 +697,13 @@ class VpnActivity : Activity() {
     // bottom-to-top, in the reference orange.
     private fun protocolEdgeLabel(protocol: String): LinearLayout {
         val d = resources.displayMetrics.density
-        val w = minOf(110, protocol.length * 8 + 20)
+        val w = minOf(170, protocol.length * 7 + 20)
         return LinearLayout(this).apply {
             gravity = Gravity.CENTER
             layoutParams = LinearLayout.LayoutParams((30 * d).toInt(), LinearLayout.LayoutParams.MATCH_PARENT)
             addView(TextView(this@VpnActivity).apply {
                 text = protocol
-                textSize = 12f
+                textSize = if (protocol.length > 12) 10f else 12f
                 setTypeface(null, android.graphics.Typeface.BOLD)
                 setTextColor(Color.parseColor("#E8913A"))
                 gravity = Gravity.CENTER
@@ -545,16 +786,8 @@ class VpnActivity : Activity() {
      *  returns to glass. */
     private fun glassTopButton(label: String, onClick: () -> Unit): Button {
         val size = (40 * resources.displayMetrics.density).toInt()
-        val glass = android.graphics.drawable.GradientDrawable().apply {
-            shape = android.graphics.drawable.GradientDrawable.OVAL
-            setColor(Color.parseColor("#E0FFFFFF"))
-            setStroke(2, Color.parseColor("#DDDDDD"))
-        }
-        val pale = android.graphics.drawable.GradientDrawable().apply {
-            shape = android.graphics.drawable.GradientDrawable.OVAL
-            setColor(Color.parseColor("#E3F2FD"))
-            setStroke(2, Color.parseColor("#BBDEFB"))
-        }
+        val glass = lightOval(Color.parseColor("#E0FFFFFF"), Color.parseColor("#DDDDDD"), 1f)
+        val pale = lightOval(Color.parseColor("#E3F2FD"), Color.parseColor("#BBDEFB"), 1f)
         return Button(this).apply {
             text = label; textSize = 14f
             setTextColor(Color.parseColor("#333333"))
@@ -577,18 +810,8 @@ class VpnActivity : Activity() {
     /** A glass menu button: very pale blue, rounded,
      *  separated from its neighbours by margins. */
     private fun glassMenuButton(label: String, onClick: () -> Unit): Button {
-        val pale = android.graphics.drawable.GradientDrawable().apply {
-            shape = android.graphics.drawable.GradientDrawable.RECTANGLE
-            cornerRadius = 24f
-            setColor(Color.parseColor("#E8F4FD"))
-            setStroke(2, Color.parseColor("#BBDEFB"))
-        }
-        val stronger = android.graphics.drawable.GradientDrawable().apply {
-            shape = android.graphics.drawable.GradientDrawable.RECTANGLE
-            cornerRadius = 24f
-            setColor(Color.parseColor("#BBDEFB"))
-            setStroke(2, Color.parseColor("#90CAF9"))
-        }
+        val pale = lightRect(Color.parseColor("#E8F4FD"), Color.parseColor("#BBDEFB"), 1f, 20f)
+        val stronger = lightRect(Color.parseColor("#BBDEFB"), Color.parseColor("#90CAF9"), 1f, 20f)
         return Button(this).apply {
             text = label; textSize = 16f
             setTextColor(Color.parseColor("#333333"))
@@ -660,7 +883,7 @@ class VpnActivity : Activity() {
             setTextColor(Color.parseColor("#333333"))
             background = android.graphics.drawable.GradientDrawable().apply {
                 shape = android.graphics.drawable.GradientDrawable.OVAL
-                setColor(Color.WHITE)
+                setColor(Color.parseColor("#E8FFFFFF"))
                 setStroke(2, Color.parseColor("#DDDDDD"))
             }
             layoutParams = LinearLayout.LayoutParams(infoSize, infoSize).apply {
@@ -709,7 +932,7 @@ class VpnActivity : Activity() {
                     fabLongPressed = false
                     fabDownX = ev.x
                     fabDownY = ev.y
-                    // Glass touch: pale blue for 2 seconds.
+                    // Glass touch: dark glass + cyan ring for 2 seconds.
                     fabGlassUntil = System.currentTimeMillis() + 2000
                     connectBtn.background = android.graphics.drawable.GradientDrawable().apply {
                         shape = android.graphics.drawable.GradientDrawable.OVAL
@@ -749,14 +972,13 @@ class VpnActivity : Activity() {
         }
     }
 
-    /** The FAB itself: a thin ring always around it.
-     *  Disconnected: ring light gray, fill = mode color
-     *  (pale yellow for normal, pale blue for best) or
-     *  light gray if no mode chosen yet. Connected:
-     *  the whole circle is green, ring green. Label is
-     *  N for normal, B for best, ▶/■ before any mode
-     *  is chosen. During the 2-second glass touch the
-     *  pale blue is kept. */
+    /** The FAB itself: dark glass with a neon ring.
+     *  Connected: green neon ring. Busy: orange ring.
+     *  Normal mode: cyan-to-amber ring, letter N.
+     *  Best mode: cyan-to-violet ring, letter B.
+     *  No mode yet: gray ring, ▶. During the
+     *  2-second glass touch the dark glass + cyan
+     *  ring is kept. */
     private fun refreshFab() {
         if (System.currentTimeMillis() < fabGlassUntil &&
             modeRow.visibility != View.VISIBLE && !fabBusy) {
@@ -769,47 +991,46 @@ class VpnActivity : Activity() {
         // never light this button up.
         val ownSession = VpnClientService.isRunning &&
             VpnClientService.sessionTag in arrayOf("v2ray", "smart", null)
-        val connected = ownSession || ProxyOnlyService.isRunning
+        // 2.45: a DEAD background verdict demotes
+        // the button from green — the tunnel is up
+        // but carries no traffic, so green would be
+        // a lie. 2.54: the demoted label is a red !
+        // (warning), NOT ✕ — ✕ reads as "disconnect
+        // me" and pulled users into tapping away a
+        // session the app never stopped itself.
+        // Tapping still disconnects (toggleConnect
+        // keys on isRunning, not on this color);
+        // the session itself is never stopped by a
+        // verdict alone.
+        val verifyDead = ownSession && ConnVerify.isDeadV2ray(this, VpnClientService.sessionTag, VpnClientService.currentName)
+        val connected = (ownSession && !verifyDead) || ProxyOnlyService.isRunning
         if (connected) fabBusy = false
-        val (fill, stroke, fg, label) = when {
-            connected -> listOf(
-                Color.parseColor("#2E9E5B"),
-                Color.parseColor("#2E9E5B"),
+        // Blink phase: the ring (stroke) alternates between
+        // its color and a lighter shade; the fill and the
+        // letter never change.
+        val (bg, fg, label) = when {
+            verifyDead -> Triple(lightOval(Color.parseColor("#FFCDD2"), Color.parseColor("#D32F2F"), 2f),
+                Color.parseColor("#B71C1C"),
+                "!")
+            connected -> Triple(lightOval(Color.parseColor("#C8E6C9"), Color.parseColor(if (fabBlinkLight) "#81C784" else "#2E9E5B"), 2f),
                 Color.WHITE,
-                if (mode == "normal") "N" else if (mode == "best") "B" else "■"
-            )
-            fabBusy -> listOf(
-                Color.parseColor("#FFF3E0"),
-                Color.parseColor("#FFB74D"),
+                if (mode == "normal") "N" else if (mode == "best") "B" else "■")
+            fabBusy -> Triple(lightOval(Color.parseColor("#FFE0B2"), Color.parseColor("#E8913A"), 2f),
                 Color.parseColor("#E65100"),
-                "…"
-            )
-            mode == "normal" -> listOf(
-                Color.parseColor("#FFF9C4"),
-                Color.parseColor("#BDBDBD"),
+                "…")
+            mode == "normal" -> Triple(lightOval(Color.parseColor("#FFF9C4"), Color.parseColor(if (fabBlinkLight) "#FFD54F" else "#F9A825"), 2f),
                 Color.parseColor("#666666"),
-                "N"
-            )
-            mode == "best" -> listOf(
-                Color.parseColor("#E3F2FD"),
-                Color.parseColor("#BDBDBD"),
+                "N")
+            mode == "best" -> Triple(lightOval(Color.parseColor("#E3F2FD"), Color.parseColor(if (fabBlinkLight) "#64B5F6" else "#1565C0"), 2f),
                 Color.parseColor("#1565C0"),
-                "B"
-            )
-            else -> listOf(
-                Color.parseColor("#E0E0E0"),
-                Color.parseColor("#BDBDBD"),
+                "B")
+            else -> Triple(lightOval(Color.parseColor("#E0E0E0"), Color.parseColor("#9E9E9E"), 2f),
                 Color.parseColor("#666666"),
-                "▶"
-            )
+                "▶")
         }
-        connectBtn.text = label as String
-        connectBtn.setTextColor(fg as Int)
-        connectBtn.background = android.graphics.drawable.GradientDrawable().apply {
-            shape = android.graphics.drawable.GradientDrawable.OVAL
-            setColor(fill as Int)
-            setStroke(3, stroke as Int)
-        }
+        connectBtn.text = label
+        connectBtn.setTextColor(fg)
+        connectBtn.background = bg
     }
 
     /** Subscription groups: the sub links now live here,
@@ -1036,6 +1257,14 @@ class VpnActivity : Activity() {
     override fun onResume() {
         super.onResume()
         handler.post(statusPoller)
+        handler.post(cfFlagToggle)
+        handler.post(alienFlagToggle)
+        handler.post(fabBlinkRunnable)
+        // ADAPTIVE ENGINE (1.78): report button
+        // follows the toggle; a stale one-shot plan
+        // never survives an engine-off return.
+        AdaptiveEngine.setReportVisible(engineReportRow, this, AdaptiveEngine.S_V2RAY)
+        if (!AdaptiveEngine.isEnabled(this)) { engineLink = null; enginePlan = null }
         // Hint next to the FAB, for 5 seconds, until the
         // first long-press has ever happened.
         if (!modeDone() && ::hintText.isInitialized) {
@@ -1049,6 +1278,9 @@ class VpnActivity : Activity() {
     override fun onPause() {
         super.onPause()
         handler.removeCallbacks(statusPoller)
+        handler.removeCallbacks(cfFlagToggle)
+        handler.removeCallbacks(alienFlagToggle)
+        handler.removeCallbacks(fabBlinkRunnable)
     }
 
     private fun saveServers() {
@@ -1125,6 +1357,13 @@ class VpnActivity : Activity() {
      *  show under All only, until their sub updates. */
     private fun visibleConfigs(): List<String> {
         if (selectedTab.isBlank()) return servers
+        if (selectedTab == "CF::CLOUDFLARE") {
+            val cm = loadCfMap()
+            return servers.filter { cfg ->
+                !XraySpeedtest.isGroup(cfg) &&
+                    cm.containsKey(XraySpeedtest.dedupKey(cfg))
+            }
+        }
         if (selectedTab.startsWith("GROUP::")) {
             return VpnSubs.groupMembers(servers, selectedTab)
         }
@@ -1147,6 +1386,18 @@ class VpnActivity : Activity() {
         val showGroups = prefs().getBoolean("show_all_groups", false)
         val tabs = mutableListOf<Pair<String, String>>()
         tabs += "" to L("تمام کانفیگ‌ها", "All configs")
+        // Cloudflare tab (NOT a subscription: it never
+        // appears in the subscriptions section, and it
+        // cannot be edited there — it vanishes when its
+        // last config is deleted.
+        val cm = loadCfMap()
+        val cfCount = servers.count { cfg ->
+            !XraySpeedtest.isGroup(cfg) &&
+                cm.containsKey(XraySpeedtest.dedupKey(cfg))
+        }
+        if (cfCount > 0) {
+            tabs += "CF::CLOUDFLARE" to "${L("کلادفلر", "Cloudflare")} ($cfCount)"
+        }
         for (item in items) {
             val count = servers.count { cfg ->
                 !XraySpeedtest.isGroup(cfg) &&
@@ -1204,7 +1455,227 @@ class VpnActivity : Activity() {
             .show()
     }
 
+    /** Country code for a Cloudflare-imported config, or null. */
+    private fun cfCountryOf(cfg: String): String? {
+        return cfMap[XraySpeedtest.dedupKey(cfg)]
+    }
+
+    private fun cfDisplayName(code: String): String {
+        return when (code) {
+            "de" -> L("کلودفلر - آلمان", "Cloudflare - Germany")
+            "nl" -> L("کلودفلر - هلند", "Cloudflare - Netherlands")
+            "fr" -> L("کلودفلر - فرانسه", "Cloudflare - France")
+            "cn" -> L("کلودفلر - چین", "Cloudflare - China")
+            "us" -> L("کلودفلر - آمریکا", "Cloudflare - United States")
+            "ca" -> L("کلودفلر - کانادا", "Cloudflare - Canada")
+            "gb" -> L("کلودفلر - انگلیس", "Cloudflare - United Kingdom")
+            "nop" -> L("کلودفلر - بدون پروکسی", "Cloudflare - No proxy")
+            else -> L("کلودفلر", "Cloudflare")
+        }
+    }
+
+    private fun cfCountryName(code: String): String {
+        return when (code) {
+            "de" -> L("آلمان", "Germany")
+            "nl" -> L("هلند", "Netherlands")
+            "fr" -> L("فرانسه", "France")
+            "cn" -> L("چین", "China")
+            "us" -> L("آمریکا", "United States")
+            "ca" -> L("کانادا", "Canada")
+            "gb" -> L("انگلیس", "United Kingdom")
+            "nop" -> L("بدون پروکسی", "No proxy")
+            else -> L("نامشخص", "unknown")
+        }
+    }
+
+    /** Flag emoji drawn onto a bitmap, so the row's ImageView can
+     *  alternate between the flag and the Cloudflare icon. */
+    private fun flagBitmap(flag: String): android.graphics.Bitmap {
+        val size = 96
+        val bmp = android.graphics.Bitmap.createBitmap(
+            size, size, android.graphics.Bitmap.Config.ARGB_8888
+        )
+        val canvas = android.graphics.Canvas(bmp)
+        val paint = android.graphics.Paint().apply {
+            isAntiAlias = true
+            textSize = 64f
+            textAlign = android.graphics.Paint.Align.CENTER
+        }
+        val y = size / 2f - (paint.descent() + paint.ascent()) / 2f
+        canvas.drawText(flag, size / 2f, y, paint)
+        return bmp
+    }
+
+    /** Alien-imported dedupKeys, fresh from
+     *  prefs every time, like loadCfMap. */
+    private fun loadAlienSet(): Set<String> {
+        return try {
+            val arr = org.json.JSONArray(
+                getSharedPreferences("renamer_vpn", MODE_PRIVATE)
+                    .getString("alien_configs", "[]") ?: "[]")
+            val s = mutableSetOf<String>()
+            for (i in 0 until arr.length()) s += arr.optString(i)
+            s
+        } catch (_: Exception) {
+            emptySet()
+        }
+    }
+
+    private fun alienBitmap(): android.graphics.Bitmap {
+        alienBitmapCache?.let { return it }
+        val bmp = try {
+            val raw = android.graphics.BitmapFactory.decodeStream(assets.open("alien.png"))
+            android.graphics.Bitmap.createScaledBitmap(raw, 96, 96, true)
+        } catch (_: Exception) {
+            flagBitmap("\uD83D\uDC7D")
+        }
+        alienBitmapCache = bmp
+        return bmp
+    }
+
+    /** Deep galaxy card for alien rows (darker
+     *  than Cloudflare's soft lavender tint). */
+    private fun galaxyCardBg(): android.graphics.drawable.Drawable {
+        return android.graphics.drawable.GradientDrawable(
+            android.graphics.drawable.GradientDrawable.Orientation.TL_BR,
+            intArrayOf(
+                Color.parseColor("#1A237E"),
+                Color.parseColor("#4A148C"),
+                Color.parseColor("#006064")
+            )).apply {
+            cornerRadius = 20f * resources.displayMetrics.density
+            setStroke((1 * resources.displayMetrics.density).toInt(), Color.parseColor("#7E57C2"))
+        }
+    }
+
+    /** Light text for a galaxy card: name white,
+     *  host pale grey, ping light green (or pale
+     *  grey when unmeasured). Children order is
+     *  fixed by the row builder: dot, info, ping. */
+    private fun recolorRowForGalaxy(row: android.widget.LinearLayout) {
+        try {
+            val info = row.getChildAt(1)
+            if (info is android.view.ViewGroup) {
+                for (i in 0 until info.childCount) {
+                    val tv = info.getChildAt(i)
+                    if (tv is android.widget.TextView) {
+                        tv.setTextColor(if (i == 0) Color.WHITE else Color.parseColor("#CFD8DC"))
+                    }
+                }
+            }
+            val ping = row.getChildAt(2)
+            if (ping is android.widget.TextView) {
+                ping.setTextColor(
+                    if (ping.text.toString() == "—") Color.parseColor("#B0BEC5")
+                    else Color.parseColor("#A5D6A7"))
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun cloudBitmap(): android.graphics.Bitmap {
+        cfCloudBitmap?.let { return it }
+        val bmp = try {
+            val raw = android.graphics.BitmapFactory.decodeStream(assets.open("cf.png"))
+            android.graphics.Bitmap.createScaledBitmap(raw, 96, 96, true)
+        } catch (_: Exception) {
+            flagBitmap("☁️")
+        }
+        cfCloudBitmap = bmp
+        return bmp
+    }
+
+    /** Cloudflare import map (dedupKey -> country code), fresh
+     *  from prefs every time, so the tab count never goes stale. */
+    private fun loadCfMap(): Map<String, String> {
+        return try {
+            val o = org.json.JSONObject(
+                getSharedPreferences("renamer_cf", MODE_PRIVATE)
+                    .getString("cf_imported", "") ?: ""
+            )
+            val m = mutableMapOf<String, String>()
+            for (k in o.keys()) m[k] = o.optString(k, "")
+            m
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
+
+    /** Flag emoji for a Cloudflare country code: the fixed
+     *  four, or a scanned country's stored flag. */
+    private fun cfFlagEmoji(code: String): String {
+        when (code) {
+            "de" -> return "🇩🇪"
+            "nl" -> return "🇳🇱"
+            "fr" -> return "🇫🇷"
+            "cn" -> return "🇨🇳"
+            "us" -> return "🇺🇸"
+            "ca" -> return "🇨🇦"
+            "gb" -> return "🇬🇧"
+        }
+        return try {
+            val arr = org.json.JSONArray(
+                getSharedPreferences("renamer_cf", MODE_PRIVATE)
+                    .getString("cf_proxy_countries", "[]") ?: "[]"
+            )
+            var out = ""
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                if (o.optString("code", "") == code) {
+                    out = o.optString("flag", "")
+                    break
+                }
+            }
+            out
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
+    // rows for configs this core cannot connect
+    // (hysteria2/hy2/tuic have no outbound) must not
+    // look normal — they get an honest suffix, and
+    // the first sighting is logged once (generic).
+    private val testLoggedUnsupported = mutableSetOf<String>()
+    private fun unsupportedSuffix(cfg: String): String {
+        val scheme = cfg.substringBefore("://").lowercase()
+        if (scheme != "hysteria2" && scheme != "hy2" && scheme != "tuic") return ""
+        val unsupported = try { XraySpeedtest.outboundFor(cfg) == null } catch (_: Exception) { false }
+        if (!unsupported) return ""
+        if (testLoggedUnsupported.add(XraySpeedtest.dedupKey(cfg))) {
+                    }
+        return L(" (پشتیبانی نمی‌شود)", " (not supported)")
+    }
+
+    /** one central-log line per connect attempt when a TEST parser
+     *  fix actually applies to this config (Trojan password fallback,
+     *  WS path from the link's own path). Generic: never the config. */
+    private fun testLogConnectFixes(cfg: String) {
+        try {
+            val raw = cfg.substringBefore("#")
+            if (raw.startsWith("trojan://") && raw.contains("@")) {
+                val ui = raw.removePrefix("trojan://").substringBefore("@")
+                if (ui.isNotBlank() && !ui.contains(":")) {
+                                    }
+            }
+            val scheme = raw.substringBefore("://").lowercase()
+            if (scheme == "vless" || scheme == "trojan") {
+                val uri = java.net.URI(raw)
+                val params = (uri.rawQuery ?: "").split("&").mapNotNull {
+                    val kv = it.split("=", limit = 2)
+                    if (kv.size == 2) kv[0] to kv[1] else null
+                }.toMap()
+                val p = uri.path ?: ""
+                if (params["type"] == "ws" && params["path"] == null && p.isNotBlank() && p != "/") {
+                                    }
+            }
+        } catch (_: Exception) {}
+    }
+
     private fun refreshList() {
+        cfFlagViews.clear()
+        cfMap = loadCfMap()
+        alienFlagViews.clear()
+        alienSet = loadAlienSet()
         refreshTabBar()
         listContainer.removeAllViews()
         val visible = visibleConfigs()
@@ -1220,15 +1691,21 @@ class VpnActivity : Activity() {
         }
         val doubleCol = prefs().getBoolean("double_column", false)
         val cards = mutableListOf<View>()
-        for (cfg in visible) {
+        for ((vi, cfg) in visible.withIndex()) {
             val isGroup = XraySpeedtest.isGroup(cfg)
             val srv = XraySpeedtest.parseServer(cfg)
-            val name = XraySpeedtest.displayName(cfg)
+            val cfCountry = cfCountryOf(cfg)
+            val name = cfCountry?.let { cfDisplayName(it) } ?: XraySpeedtest.displayName(cfg)
             val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(0, 10, 0, 10)
+                // Uniform row height (1.79): every
+                // row is at least 60dp, so a group
+                // header (one line) is exactly as
+                // tall as a config row (two lines).
+                minimumHeight = (60 * resources.displayMetrics.density).toInt()
             }
             if (isGroup) {
                 // Group header: selectable now (tapping
@@ -1239,6 +1716,8 @@ class VpnActivity : Activity() {
                 row.addView(TextView(this).apply {
                     text = "▾  $name"; textSize = 16f
                     setTextColor(Color.parseColor("#0B6E4F"))
+                    isSingleLine = true
+                    ellipsize = android.text.TextUtils.TruncateAt.END
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                 })
                 row.addView(glassCircleButton("✕") {
@@ -1269,10 +1748,22 @@ class VpnActivity : Activity() {
                 orientation = LinearLayout.VERTICAL
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             }
-            info.addView(TextView(this).apply { text = name; textSize = 16f })
+            info.addView(TextView(this).apply {
+                text = name + unsupportedSuffix(cfg); textSize = 16f
+                // WHITE on the #F2F5F9 card was
+                // unreadable (1.79 fix): dark text.
+                // Single line + ellipsis keeps every
+                // row the same height: a long name
+                // used to wrap and make its row taller.
+                setTextColor(Color.parseColor("#1A1A1A"))
+                isSingleLine = true
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            })
             info.addView(TextView(this).apply {
                 text = "${srv?.host ?: "?"}:${srv?.port ?: "?"}"
                 textSize = 13f; setTextColor(Color.GRAY)
+                isSingleLine = true
+                ellipsize = android.text.TextUtils.TruncateAt.END
             })
             row.addView(info)
             val ping = pingMap[XraySpeedtest.dedupKey(cfg)]
@@ -1287,6 +1778,81 @@ class VpnActivity : Activity() {
             // (see GeoFlag); otherwise it is the host's
             // country. While the lookup runs it shows 🌐.
             val host = srv?.host ?: ""
+            if (cfCountry != null) {
+                // Cloudflare import: an ImageView alternating
+                // every 2s between the country flag and the
+                // Cloudflare section icon (see cfFlagToggle).
+                val flagEmoji = cfFlagEmoji(cfCountry)
+                val flagBmp = flagBitmap(flagEmoji)
+                val cloudBmp = cloudBitmap()
+                val flagView = android.widget.ImageView(this).apply {
+                    val d = resources.displayMetrics.density
+                    val size = (30 * d).toInt()
+                    layoutParams = LinearLayout.LayoutParams(size, size).apply {
+                        setMargins((5 * d).toInt(), 0, (5 * d).toInt(), 0)
+                    }
+                    background = lightOval(
+                        Color.parseColor("#E8FFFFFF"),
+                        Color.parseColor("#55000000"), 1f
+                    )
+                    scaleType = android.widget.ImageView.ScaleType.CENTER_INSIDE
+                    setPadding((2 * d).toInt(), (2 * d).toInt(), (2 * d).toInt(), (2 * d).toInt())
+                    setImageBitmap(if (cfFlagShowCloud) cloudBmp else flagBmp)
+                    setOnClickListener {
+                        showGeoMessage(
+                            L(
+                                "این کانفیگ کلودفلر برای کشور ${cfCountryName(cfCountry)} است",
+                                "This Cloudflare config is for ${cfCountryName(cfCountry)}"
+                            )
+                        )
+                    }
+                }
+                row.addView(flagView)
+                cfFlagViews += Triple(flagView, flagBmp, cloudBmp)
+            } else if (alienSet.contains(XraySpeedtest.dedupKey(cfg))) {
+                // Alien import: a circle alternating
+                // every 2s between the geo flag and
+                // the alien section icon — the same
+                // trick as Cloudflare's flag/cloud.
+                val alienBmp = alienBitmap()
+                val holder = AlienFlagState(alienBmp, flagBitmap("🌐"))
+                val alienView = android.widget.ImageView(this).apply {
+                    val d = resources.displayMetrics.density
+                    val size = (30 * d).toInt()
+                    layoutParams = LinearLayout.LayoutParams(size, size).apply {
+                        setMargins((5 * d).toInt(), 0, (5 * d).toInt(), 0)
+                    }
+                    background = lightOval(
+                        Color.parseColor("#E8FFFFFF"),
+                        Color.parseColor("#55000000"), 1f
+                    )
+                    scaleType = android.widget.ImageView.ScaleType.CENTER_INSIDE
+                    setPadding((2 * d).toInt(), (2 * d).toInt(), (2 * d).toInt(), (2 * d).toInt())
+                    setImageBitmap(if (alienFlagShowAlien) alienBmp else holder.flagBmp)
+                    setOnClickListener {
+                        showGeoMessage(
+                            if (holder.country.isNotBlank()) L(
+                                "این کانفیگ از بخش زبان بیگانه آمده است؛ کشور ${holder.country} و شهر ${holder.city}",
+                                "This config came from the Alien Language section; ${holder.country}, ${holder.city}"
+                            ) else L(
+                                "این کانفیگ از بخش زبان بیگانه آمده است",
+                                "This config came from the Alien Language section"
+                            )
+                        )
+                    }
+                }
+                holder.view = alienView
+                row.addView(alienView)
+                alienFlagViews += holder
+                if (host.isNotBlank()) {
+                    GeoFlag.lookupForConfig(this, cfg, host) { cc, country, city ->
+                        holder.flagBmp = flagBitmap(GeoFlag.flagEmoji(cc))
+                        holder.country = country
+                        holder.city = city
+                        if (!alienFlagShowAlien) alienView.setImageBitmap(holder.flagBmp)
+                    }
+                }
+            } else {
             var geoCountry = ""
             var geoCity = ""
             val flagBtn = glassCircleButton("🌐") {
@@ -1305,6 +1871,7 @@ class VpnActivity : Activity() {
                     geoCity = city
                     flagBtn.text = GeoFlag.flagEmoji(cc)
                 }
+            }
             }
             row.addView(glassCircleButton("✕") {
                 confirmDelete(name) {
@@ -1325,10 +1892,84 @@ class VpnActivity : Activity() {
             row.setOnClickListener {
                 selected = cfg; saveServers(); refreshList()
             }
+            // Drag to reorder (v2rayNG-style): long-press a
+            // row, drop it on another row. Only in the All
+            // tab, where the visible list IS the saved list.
+            row.setOnLongClickListener {
+                if (selectedTab.isNotBlank()) {
+                    android.widget.Toast.makeText(
+                        this,
+                        L("جابجایی فقط در «تمام کانفیگ‌ها» ممکن است.", "Reordering is only possible in All configs."),
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                    false
+                } else {
+                    dragFrom = vi
+                    val data = android.content.ClipData.newPlainText("index", vi.toString())
+                    row.startDragAndDrop(data, View.DragShadowBuilder(row), null, 0)
+                    true
+                }
+            }
+            row.setOnDragListener { _, ev ->
+                when (ev.action) {
+                    android.view.DragEvent.ACTION_DRAG_ENTERED -> {
+                        row.setBackgroundColor(Color.parseColor("#E3F2FD"))
+                        true
+                    }
+                    android.view.DragEvent.ACTION_DRAG_EXITED,
+                    android.view.DragEvent.ACTION_DRAG_ENDED -> {
+                        row.background = null
+                        if (ev.action == android.view.DragEvent.ACTION_DRAG_ENDED) dragFrom = -1
+                        true
+                    }
+                    android.view.DragEvent.ACTION_DROP -> {
+                        val from = dragFrom
+                        dragFrom = -1
+                        row.background = null
+                        if (from >= 0 && from != vi && selectedTab.isBlank()) {
+                            val list = servers.toMutableList()
+                            val item = list.removeAt(from)
+                            // Drop position: upper half ->
+                            // before this row, lower half ->
+                            // after it.
+                            var to = if (ev.y < row.height / 2f) vi else vi + 1
+                            if (from < to) to -= 1
+                            if (to < 0) to = 0
+                            if (to > list.size) to = list.size
+                            list.add(to, item)
+                            servers.clear()
+                            servers.addAll(list)
+                            saveServers()
+                        }
+                        refreshList()
+                        true
+                    }
+                    else -> true
+                }
+            }
             row.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             val card = serverCard(isSel)
+            if (cfCountry != null) {
+                // Soft galaxy tint, so Cloudflare imports stand
+                // apart from ordinary configs at a glance.
+                card.background = lightRect(
+                    Color.parseColor("#ECE9FF"),
+                    Color.parseColor("#7B7FE0"), 1f, 20f
+                )
+            } else if (alienSet.contains(XraySpeedtest.dedupKey(cfg))) {
+                // Alien import: deep galaxy card with
+                // light text, apart from both ordinary
+                // and Cloudflare rows.
+                card.background = galaxyCardBg()
+                recolorRowForGalaxy(row)
+            }
             card.addView(row)
-            card.addView(protocolEdgeLabel(XraySpeedtest.protocolLabel(cfg)))
+            card.addView(
+                protocolEdgeLabel(
+                    cfCountry?.let { L("کلودفلر", "Cloudflare") }
+                        ?: XraySpeedtest.fullType(cfg)
+                )
+            )
             col.addView(card)
             if (isSel) selectedRowView = col
             cards += col
@@ -1371,6 +2012,8 @@ class VpnActivity : Activity() {
     // forever, because nothing ever wrote the
     // success. One transition line, then silence.
     private var stripAnnouncedConnected = false
+    // 2.13: last service error already shown in the strip.
+    private var lastShownServiceError: String? = null
 
     private fun refreshStatus() {
         refreshFab()
@@ -1379,6 +2022,7 @@ class VpnActivity : Activity() {
             ProxyOnlyService.isRunning
         if (connectedNow && !stripAnnouncedConnected) {
             stripAnnouncedConnected = true
+            appLogConnected()
             val nm = VpnClientService.currentName
             val ping = selected?.let { pingMap[XraySpeedtest.dedupKey(it)] }
             val pingPart = if (ping != null && ping >= 0) "؛ پینگ $ping ms" else ""
@@ -1395,16 +2039,48 @@ class VpnActivity : Activity() {
             }
         } else if (!connectedNow) {
             stripAnnouncedConnected = false
+            // 2.13: a failed connect used to die silently (the
+            // strip stayed on Connecting...). Show the service
+            // stored reason once, instead of silence.
+            val err = VpnClientService.lastError
+            if (err != null && err != lastShownServiceError) {
+                lastShownServiceError = err
+                addStatusLine("خطا در اتصال: $err", "Connect error: $err")
+                if (appLogPending) { appLogEvent("ناموفق بود: $err", "failed: $err"); appLogPending = false }
+            }
         }
     }
 
-    private fun disconnectVpn() {
+    /** ADAPTIVE ENGINE (1.82): stop a session the fallback check
+     *  proved dead. Same stops as disconnectVpn, but it must NOT
+     *  write smart_manual_stop_until — that suppression belongs
+     *  ONLY to a manual disconnect (Smart regression guard). */
+    private fun stopFallbackSession() {
+        fallbackCheckToken = 0L
         try { ProxyOnlyService.stop(this) } catch (_: Exception) {}
         val stopIntent = Intent(this, VpnClientService::class.java).apply {
             action = "STOP"
+            putExtra("stop_gen", VpnClientService.sessionGen)
         }
         try { startService(stopIntent) } catch (_: Exception) {}
-        try { stopService(Intent(this, VpnClientService::class.java)) } catch (_: Exception) {}
+        VpnClientService.isRunning = false
+        VpnClientService.currentName = null
+        VpnClientService.sessionTag = null
+        try { getSharedPreferences("renamer_hydra", MODE_PRIVATE).edit().putBoolean("hydra_active", false).apply() } catch (_: Exception) {}
+        VpnClientService.emergencyConfig = null
+        refreshStatus()
+    }
+
+    private fun disconnectVpn() {
+        val stopName = VpnClientService.currentName
+        val stopTag = VpnClientService.sessionTag
+        fallbackCheckToken = 0L
+        try { ProxyOnlyService.stop(this) } catch (_: Exception) {}
+        val stopIntent = Intent(this, VpnClientService::class.java).apply {
+            action = "STOP"
+            putExtra("stop_gen", VpnClientService.sessionGen)
+        }
+        try { startService(stopIntent) } catch (_: Exception) {}
         VpnClientService.isRunning = false
         VpnClientService.currentName = null
         VpnClientService.sessionTag = null
@@ -1418,9 +2094,66 @@ class VpnActivity : Activity() {
         VpnClientService.emergencyConfig = null
         refreshStatus()
         addStatusLine("اتصال قطع شد.", "Disconnected.")
+        if (stopName != null && (stopTag == null || stopTag == "v2ray" || stopTag == "smart")) {
+            AppLog.append(this, stopTag ?: "v2ray",
+                "«$stopName»؛ دستی قطع شد.", "“$stopName”; stopped manually.")
+        }
+        appLogPending = false
     }
 
+    /** ADAPTIVE ENGINE (1.78), first priority: when
+     *  the engine is on, the ladder runs on a
+     *  background thread and the winner (or the
+     *  original, on any no-win) goes through the
+     *  exact old connect path below. When off, this
+     *  is a straight pass-through. */
     private fun connectSelected(cfg: String) {
+        if (!AdaptiveEngine.isEnabled(this)) {
+            appLogBegin(cfg, false, null)
+            connectSelectedDirect(cfg)
+            return
+        }
+        // 2.39: never run two engine checks at once.
+        if (engineRunActive) {
+            statusText.text = L("موتور هوشمند در حال بررسی است؛ کمی صبر کن.", "Smart engine is still checking; please wait.")
+            return
+        }
+        engineRunActive = true
+        statusText.text = L("موتور هوشمند در حال بررسی کانفیگ...", "Smart engine checking config...")
+        Thread {
+            // the jump/chain pool also takes persisted healthy
+            // delays (subscription tests), not just this page's memory.
+            val memPool = servers.filter { (pingMap[XraySpeedtest.dedupKey(it)] ?: -1L) >= 0 }
+            val persistedPool = AdaptiveEngine.persistedPool(this, servers)
+            if (persistedPool.any { it !in memPool }) {
+                            }
+            val pool = (memPool + persistedPool).distinct()
+            // 2.38: 90s — on a filtered line the
+            // failing probes of waves 1-2 alone ate
+            // the old 45s budget, so waves 4-5 never
+            // ran (and skipped silently).
+            val plan = AdaptiveEngine.selectV2ray(this, cfg, AdaptiveEngine.S_V2RAY, 90000, pool)
+            runOnUiThread {
+                engineRunActive = false
+                if (plan != null) {
+                    enginePlan = plan
+                    engineLink = plan.link
+                }
+                appLogBegin(cfg, true, plan)
+                // 2.39: the traffic check runs for WON
+                // sessions too — a probe-passed win
+                // that carries no real traffic must
+                // not stay "connected" (01:50 HK case).
+                pendingFallbackCheck = true
+                pendingWonCheck = (plan != null)
+                pendingWonLink = plan?.link
+                fabBusy = true; refreshFab()
+                connectSelectedDirect(engineLink ?: cfg)
+            }
+        }.start()
+    }
+
+    private fun connectSelectedDirect(cfg: String) {
         // Proxy-only mode runs the core without a TUN,
         // so it needs no VPN permission prompt.
         if (prefs().getString("vpn_mode", "VPN") == "Proxy only") {
@@ -1433,6 +2166,155 @@ class VpnActivity : Activity() {
         } else {
             startVpn(cfg)
         }
+    }
+
+    // ---------- ADAPTIVE ENGINE (1.79): batch repair ----------
+
+    private fun onBatchRepair() {
+        if (!AdaptiveEngine.isEnabled(this)) return
+        val healthyPool = servers.filter { (pingMap[XraySpeedtest.dedupKey(it)] ?: -1L) >= 0 }
+        // Only PROVEN-dead configs (a ping test
+        // already failed them), never untested ones,
+        // groups or chains (customs included since 1.82).
+        val dead = servers.filter { cfg ->
+            (pingMap[XraySpeedtest.dedupKey(cfg)] ?: -1L) < 0 &&
+            !XraySpeedtest.isGroup(cfg) && !XraySpeedtest.isChain(cfg)
+        }
+        if (dead.isEmpty()) {
+            android.widget.Toast.makeText(this, L("کانفیگ خرابی برای تعمیر نیست.", "No dead configs to repair."), android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
+        // Capped per run: each config gets up to 15s,
+        // so an unbounded list cannot turn into a
+        // 10-minute job.
+        val targets = dead.take(12)
+        val extra = dead.size - targets.size
+        android.app.AlertDialog.Builder(this)
+            .setTitle(L("تعمیر دسته‌ای", "Batch repair"))
+            .setMessage(L(
+                "${targets.size} کانفیگ خراب با موتور بررسی می‌شود" +
+                (if (extra > 0) " ($extra تای دیگر در این نوبت بررسی نمی‌شود)" else "") +
+                ". نسخه‌های تعمیرشده فقط با تأیید تو، به‌عنوان کانفیگ جدید ذخیره می‌شوند؛ کانفیگ‌های اصلی دست نمی‌خورند.",
+                "${targets.size} dead configs will be checked with the engine" +
+                (if (extra > 0) " ($extra more not covered in this run)" else "") +
+                ". Repaired copies are saved only with your confirmation, as NEW configs; the originals are never touched."))
+            .setPositiveButton(L("شروع", "Start")) { _, _ -> runBatchRepair(targets, healthyPool) }
+            .setNegativeButton(L("لغو", "Cancel"), null)
+            .show()
+    }
+
+    private fun runBatchRepair(targets: List<String>, healthyPool: List<String>) {
+        val progressText = TextView(this).apply {
+            text = L("در حال بررسی...", "Checking...")
+            textSize = 14f
+            setPadding(24, 16, 24, 16)
+        }
+        val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
+        val dlg = android.app.AlertDialog.Builder(this)
+            .setTitle(L("تعمیر دسته‌ای", "Batch repair"))
+            .setView(progressText)
+            .setNegativeButton(L("لغو", "Cancel")) { _, _ -> cancelled.set(true) }
+            .create()
+        dlg.show()
+        Thread {
+            val results = mutableListOf<Triple<String, AdaptiveEngine.Plan?, String>>()
+            for ((idx, cfg) in targets.withIndex()) {
+                if (cancelled.get()) break
+                val n = idx + 1
+                runOnUiThread {
+                    progressText.text = L("در حال بررسی $n از ${targets.size}...", "Checking $n of ${targets.size}...")
+                }
+                val plan = try {
+                    AdaptiveEngine.selectV2ray(this, cfg, AdaptiveEngine.S_V2RAY, 15000, healthyPool)
+                } catch (_: Exception) { null }
+                val label = if (plan == null) L("درست نشد", "not repaired")
+                            else L(plan.noteFa, plan.noteEn)
+                results += Triple(cfg, plan, label)
+            }
+            runOnUiThread {
+                try { dlg.dismiss() } catch (_: Exception) {}
+                showBatchResults(results)
+            }
+        }.start()
+    }
+
+    private fun showBatchResults(results: List<Triple<String, AdaptiveEngine.Plan?, String>>) {
+        if (results.isEmpty()) return
+        val lines = results.joinToString("\n") { (cfg, plan, label) ->
+            val name = XraySpeedtest.displayName(cfg)
+            if (plan == null) "✕ $name: $label" else "✓ $name ← $label"
+        }
+        val tv = TextView(this).apply {
+            text = lines
+            textSize = 13f
+            setPadding(24, 16, 24, 16)
+        }
+        val scroll = ScrollView(this).apply { addView(tv) }
+        val wins = results.filter { it.second != null }
+        val dlg = android.app.AlertDialog.Builder(this)
+            .setTitle(L("نتیجه تعمیر دسته‌ای", "Batch repair results"))
+            .setView(scroll)
+        if (wins.isNotEmpty()) {
+            dlg.setPositiveButton(L("ذخیره نسخه‌های تعمیرشده", "Save repaired copies")) { _, _ ->
+                saveBatchResults(wins)
+            }
+        }
+        dlg.setNegativeButton(L("بستن", "Close"), null)
+        dlg.show()
+    }
+
+    private fun saveBatchResults(wins: List<Triple<String, AdaptiveEngine.Plan?, String>>) {
+        var added = 0
+        for ((cfg, plan, _) in wins) {
+            if (plan == null) continue
+            val saved: String? = try {
+                if (!plan.fragment && plan.shape == null) {
+                    // Plain link variant (IP/port/fp/
+                    // SNI/transport/flow/jump/WARP):
+                    // the link itself IS the repaired
+                    // config. A saved jump chain gets
+                    // the original's name, not the
+                    // generic engine label.
+                    var link = plan.link
+                    if (XraySpeedtest.isCustom(link)) {
+                        try {
+                            val j = org.json.JSONObject(link)
+                            j.put("remarks", XraySpeedtest.displayName(cfg) + " (تعمیرشده)")
+                            link = j.toString()
+                        } catch (_: Exception) {}
+                    }
+                    if (link.startsWith("CHAIN::")) {
+                        val rest = link.removePrefix("CHAIN::")
+                        val parts = rest.substringAfter("|||", "")
+                        val origName = XraySpeedtest.displayName(cfg)
+                        link = "CHAIN::$origName (پرش)|||$parts"
+                    }
+                    link
+                } else {
+                    // Fragment/shape win: the repair
+                    // lives in the BUILT json, so the
+                    // repaired copy is saved as a
+                    // custom config (its inbounds are
+                    // replaced again at connect time).
+                    val built = buildVpnConfig(cfg) ?: continue
+                    val withPlan = AdaptiveEngine.applyPlanToBuiltJson(this, built, plan?.copy(standbys = emptyList()), true) ?: continue
+                    val j = org.json.JSONObject(withPlan)
+                    j.put("remarks", XraySpeedtest.displayName(cfg) + " (تعمیرشده)")
+                    j.toString()
+                }
+            } catch (_: Exception) { null }
+            if (saved != null && !servers.contains(saved)) {
+                servers.add(saved)
+                added++
+            }
+        }
+        if (added > 0) {
+            saveServers()
+            refreshList()
+        }
+        android.widget.Toast.makeText(this,
+            L("$added نسخه تعمیرشده ذخیره شد.", "$added repaired copies saved."),
+            android.widget.Toast.LENGTH_SHORT).show()
     }
 
     private fun toggleConnect() {
@@ -1548,12 +2430,15 @@ class VpnActivity : Activity() {
         statusText.text = L("در حال تست پینگ برای بهترین کانفیگ...", "Testing ping for the best config...")
         Thread {
             val pool = Executors.newFixedThreadPool(XraySpeedtest.poolSize())
-            // Only untested ones are measured when a
-            // healthy cache exists; with no healthy
-            // cache at all, everything is re-tested
-            // (old -1s included) so a recovered
+            // untested ones are measured when a healthy
+            // cache exists, AND configs that scored -1 are
+            // re-tested too — so auto-delete below never
+            // deletes a config that was not just re-tested.
+            // With no healthy cache at all, everything is
+            // re-tested (old -1s included) so a recovered
             // network is not missed.
-            val toTest = if (cachedHealthy.isEmpty()) targets else untested
+            val failed = targets.filter { pingMap[XraySpeedtest.dedupKey(it)] == -1L }
+            val toTest = if (cachedHealthy.isEmpty()) targets else (untested + failed).distinct()
             val completion = java.util.concurrent.ExecutorCompletionService<Pair<String, Long>>(pool)
             try {
                 for (cfg in toTest) {
@@ -1604,6 +2489,8 @@ class VpnActivity : Activity() {
                     saveServers(); refreshList()
                     statusText.text = L("بهترین کانفیگ پیدا شد، در حال اتصال...", "Best config found, connecting...")
                     addStatusLine("بهترین کانفیگ: ${XraySpeedtest.displayName(chosen)} ($bestDelay ms)", "Best config: ${XraySpeedtest.displayName(chosen)} ($bestDelay ms)")
+                    if (failed.isNotEmpty()) {
+                                            }
                     val removed = deleteNoPingIfEnabled(targets)
                     if (removed > 0) addStatusLine("$removed کانفیگ بدون پینگ حذف شد", "$removed no-ping configs removed")
                     connectSelected(chosen)
@@ -1614,6 +2501,55 @@ class VpnActivity : Activity() {
 
     /** The + menu, exactly like v2rayNG's add menu,
      *  now as separate pale-blue glass buttons. */
+    /** A small v2rayNG-style overflow popup: matte-white,
+     *  anchored under the tapped button, one line per
+     *  option, dismissed by tapping anywhere else. Text
+     *  colors stay the app's dark ones (readable on the
+     *  light popup); the main page is untouched. */
+    private fun showSmallPopupMenu(anchor: View, items: Array<String>, onSelect: (Int) -> Unit) {
+        val d = resources.displayMetrics.density
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#F5F5F5"))
+            setPadding((8 * d).toInt(), (8 * d).toInt(), (8 * d).toInt(), (8 * d).toInt())
+        }
+        val popup = android.widget.PopupWindow(
+            col,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            true
+        )
+        popup.elevation = 8f * d
+        popup.isOutsideTouchable = true
+        popup.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
+        for ((i, label) in items.withIndex()) {
+            col.addView(TextView(this).apply {
+                text = label
+                textSize = 15f
+                isSingleLine = true
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setTextColor(Color.parseColor("#333333"))
+                setPadding((16 * d).toInt(), (10 * d).toInt(), (16 * d).toInt(), (10 * d).toInt())
+                layoutParams = LinearLayout.LayoutParams(
+                    (300 * d).toInt(), LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+                setOnClickListener { popup.dismiss(); onSelect(i) }
+            })
+            if (i < items.size - 1) {
+                col.addView(View(this).apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, 1
+                    )
+                    setBackgroundColor(Color.parseColor("#E0E0E0"))
+                })
+            }
+        }
+        try {
+            popup.showAsDropDown(anchor)
+        } catch (_: Exception) {
+        }
+    }
+
     private fun showAddMenu() {
         val items = arrayOf(
             L("وارد کردن از QRcode", "Import from QRcode"),
@@ -1627,7 +2563,7 @@ class VpnActivity : Activity() {
             L("افزودن [SOCKS]", "Add [SOCKS]"),
             L("افزودن [HTTP]", "Add [HTTP]")
         )
-        showGlassMenuDialog("+", items) { which ->
+        showSmallPopupMenu(addBtn, items) { which ->
             when (which) {
                 0 -> startActivityForResult(
                     Intent(this@VpnActivity, ScanActivity::class.java), 200)
@@ -1908,7 +2844,9 @@ class VpnActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == 100 && resultCode == RESULT_OK) {
-            selected?.let { startVpn(it) }
+            val link = engineLink ?: selected
+            engineLink = null
+            link?.let { startVpn(it) }
         } else if (requestCode == 100) {
             statusText.text = L("دسترسی VPN تأیید نشد.", "VPN permission was not confirmed.")
         } else if (requestCode == 400 && resultCode == RESULT_OK) {
@@ -2070,6 +3008,7 @@ class VpnActivity : Activity() {
     // config's dns.hosts, the "Resolve only" mode
     // rewrites outbound addresses to the IPs.
     private fun startVpn(cfg: String) {
+        engineLink = null
         // A hand-started connect is not smart connect's.
         try { getSharedPreferences("renamer_smart", MODE_PRIVATE).edit().putBoolean("smart_owns_vpn", false).apply() } catch (_: Exception) {}
         if (VpnConfigBuilder.preResolveMode(this) == "Do not resolve") {
@@ -2091,15 +3030,22 @@ class VpnActivity : Activity() {
         // proxy inbounds only, no TUN, no VPN service.
         if (prefs().getString("vpn_mode", "VPN") == "Proxy only") {
             val builtProxy = VpnConfigBuilder.buildProxyOnly(this, cfg, hostsArg)
+            // ADAPTIVE ENGINE (1.78): one-shot plan
+            // (fragment injection) applied to the
+            // built JSON; null plan = unchanged.
+            val builtProxyE = AdaptiveEngine.applyPlanToBuiltJson(this, builtProxy, enginePlan, false)
+            enginePlan = null
             val proxyCfg = if (mode == "Resolve only") {
-                VpnConfigBuilder.applyResolvedIp(builtProxy ?: "", resolved)
-            } else builtProxy
+                VpnConfigBuilder.applyResolvedIp(builtProxyE ?: "", resolved)
+            } else builtProxyE
             if (proxyCfg == null) {
+                if (appLogPending) { appLogEvent("ناموفق بود: کانفیگ پشتیبانی نمی‌شود", "failed: config not supported"); appLogPending = false }
                 statusText.text = L("این کانفیگ برای اتصال پشتیبانی نمی‌شود.", "This config is not supported for connecting.")
                 fabIdle()
                 return
             }
             if (!initCore()) {
+                if (appLogPending) { appLogEvent("ناموفق بود: هسته راه‌اندازی نشد", "failed: core failed to start"); appLogPending = false }
                 statusText.text = L("هسته Xray راه‌اندازی نشد.", "Xray core failed to start.")
                 fabIdle()
                 return
@@ -2114,15 +3060,28 @@ class VpnActivity : Activity() {
         // prev -> config -> next -> destination).
         val effective = VpnSubs.chainForConfig(this, cfg) ?: cfg
         val built = buildVpnConfig(effective, hostsArg)
+        // ADAPTIVE ENGINE (1.78): one-shot plan
+        // (fragment injection) applied to the built
+        // JSON; null plan = unchanged.
+        // 1.79: remember whether this connect came
+        // from the engine, and the ORIGINAL config,
+        // before the plan is consumed below — the
+        // service needs both for its watchdog.
+        val wasEngine = enginePlan != null
+        val engineOrig = if (wasEngine) selected else null
+        val builtE = AdaptiveEngine.applyPlanToBuiltJson(this, built, enginePlan, true)
+        enginePlan = null
         val vpnConfig = if (mode == "Resolve only") {
-            VpnConfigBuilder.applyResolvedIp(built ?: "", resolved)
-        } else built
+            VpnConfigBuilder.applyResolvedIp(builtE ?: "", resolved)
+        } else builtE
         if (vpnConfig == null) {
+            if (appLogPending) { appLogEvent("ناموفق بود: کانفیگ پشتیبانی نمی‌شود", "failed: config not supported"); appLogPending = false }
             statusText.text = L("این کانفیگ برای اتصال پشتیبانی نمی‌شود.", "This config is not supported for connecting.")
             fabIdle()
             return
         }
         if (!initCore()) {
+            if (appLogPending) { appLogEvent("ناموفق بود: هسته راه‌اندازی نشد", "failed: core failed to start"); appLogPending = false }
             statusText.text = L("هسته Xray راه‌اندازی نشد.", "Xray core failed to start.")
             fabIdle()
             return
@@ -2132,12 +3091,65 @@ class VpnActivity : Activity() {
             putExtra("name", XraySpeedtest.displayName(cfg))
             putExtra("link", effective)
             putExtra("session_tag", "v2ray")
+            // ADAPTIVE ENGINE (1.79): mark the session
+            // so the service watchdog watches it, and
+            // remember the ORIGINAL link for healing.
+            if (wasEngine) {
+                putExtra("engine_session", true)
+                if (engineOrig != null) putExtra("engine_orig_link", engineOrig)
+            }
         }
         // A normal connect is not an emergency connect.
         VpnClientService.emergencyConfig = null
         startService(intent)
         statusText.text = L("در حال اتصال...", "Connecting...")
         handler.postDelayed({ refreshStatus() }, 1500)
+        // ADAPTIVE ENGINE (1.82): no fake "connected". If the
+        // engine found no win, the normal connect above runs
+        // anyway; if it comes up but no traffic passes, stop
+        // it instead of leaving a dead "connected" state.
+        // (Proxy-only mode is excluded: no TUN session exists.)
+        if (pendingFallbackCheck) {
+            pendingFallbackCheck = false
+            if (AdaptiveEngine.isEnabled(this) && prefs().getString("vpn_mode", "VPN") != "Proxy only") {
+                val token = System.currentTimeMillis()
+                fallbackCheckToken = token
+                Thread {
+                    try { Thread.sleep(12000) } catch (_: Exception) {}
+                    if (VpnClientService.isRunning && VpnClientService.sessionTag == "v2ray" && fallbackCheckToken == token && !AdaptiveEngine.probeThroughTunnel(this)) {
+                        try { Thread.sleep(8000) } catch (_: Exception) {}
+                        if (VpnClientService.isRunning && VpnClientService.sessionTag == "v2ray" && fallbackCheckToken == token && !AdaptiveEngine.probeThroughTunnel(this)) {
+                            runOnUiThread {
+                                val wasWon = pendingWonCheck
+                                val wonLink = pendingWonLink
+                                pendingWonCheck = false
+                                pendingWonLink = null
+                                stopFallbackSession()
+                                if (wasWon && wonLink != null) {
+                                    try {
+                                        AdaptiveEngine.unlearnWin(this, XraySpeedtest.dedupKey(wonLink))
+                                    } catch (_: Exception) {}
+                                    AdaptiveEngine.append(this, AdaptiveEngine.S_V2RAY,
+                                        "موتور: روش برنده در عمل ترافیکی عبور نداد؛ اتصال قطع شد و این روش برای این کانفیگ فراموش شد.",
+                                        "Engine: the winning variant carried no real traffic; stopped and that variant was forgotten for this config.")
+                                } else {
+                                    AdaptiveEngine.append(this, AdaptiveEngine.S_V2RAY,
+                                        "موتور: اتصال عادی برقرار شد ولی ترافیکی عبور نکرد؛ اتصال قطع شد تا حالت «متصل» دروغین نماند.",
+                                        "Engine: normal connect came up but no traffic passed; stopped so no fake connected state remains.")
+                                }
+                                val deadName = if (appLogName.isNotBlank()) "«$appLogName»؛ " else ""
+                                val deadNameEn = if (appLogName.isNotBlank()) "“$appLogName”; " else ""
+                                AppLog.append(this, "v2ray",
+                                    deadName + "اتصال برقرار شد ولی ترافیکی عبور نکرد؛ قطع شد" + if (wasWon) "؛ روش برنده موتور فراموش شد." else ".",
+                                    deadNameEn + "connected but no traffic passed; stopped" + if (wasWon) "; the engine's winning variant was forgotten." else ".")
+                                statusText.text = L("اتصال برقرار شد ولی ترافیکی عبور نکرد؛ قطع شد.", "Connected but no traffic passed; stopped.")
+                                android.widget.Toast.makeText(this, L("اتصال برقرار شد ولی ترافیکی عبور نکرد؛ قطع شد.", "Connected but no traffic passed; stopped."), android.widget.Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }
+                }.start()
+            }
+        }
     }
 
     private fun initCore(): Boolean {
@@ -2205,7 +3217,7 @@ class VpnActivity : Activity() {
             L("حذف خودکار تکراری‌ها: ", "Auto-delete duplicates: ") + if (autoDedupOn) L("روشن", "On") else L("خاموش", "Off"),
             L("حذف خودکار بدون‌پینگ‌ها: ", "Auto-delete no-ping: ") + if (autoNopingOn) L("روشن", "On") else L("خاموش", "Off")
         )
-        showGlassMenuDialog("⋮", items) { which ->
+        showSmallPopupMenu(menuBtn, items) { which ->
             when (which) {
                 0 -> deleteAllConfigs()
                 1 -> deleteDuplicates()

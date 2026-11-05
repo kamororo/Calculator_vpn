@@ -55,6 +55,10 @@ object OvpnEngine {
         synchronized(logLines) { return logLines.joinToString("\n") }
     }
 
+    fun clearLog() {
+        synchronized(logLines) { logLines.clear() }
+    }
+
     @Volatile var pendingProfile3: OvpnProfile? = null
     /** Double-chain plumbing (consume-once port, plus
      *  a flag that lives until disconnect): when a
@@ -62,6 +66,12 @@ object OvpnEngine {
      *  loopback proxy and the OpenVPN client connects
      *  through it. Null/false for normal connects. */
     @Volatile var chainProxyPort: Int? = null
+    /** Final http-proxy counts for the last chain
+     *  service run, as "lines|args" (counts only,
+     *  never values) — read by the central log's
+     *  chain-failure detector. Cleared when a new
+     *  chain attempt starts. */
+    @Volatile var lastChainProxyDiag: String = ""
     @Volatile var chainProxyActive: Boolean = false
     private var pendingProfile: OvpnProfile? = null
     private var pendingCallback: ((Boolean) -> Unit)? = null
@@ -85,16 +95,29 @@ object OvpnEngine {
                     isConnected = true
                     waitingForInput = false
                     lastError = null
+                    if (activeName == null) activeName = pendingProfile3?.name
                     addLog("CONNECTED: $info")
                 }
                 "DISCONNECTED" -> {
-                    // Only clear if we are not in
-                    // the middle of connecting; a
-                    // DISCONNECTED event also fires
-                    // on a clean stop.
-                    if (!isConnecting) {
-                        isConnected = false
-                        activeName = null
+                    // whatever its phase: a mid-handshake
+                    // DISCONNECTED used to leave
+                    // isConnecting true forever, so the
+                    // page stuck on "connecting" until
+                    // the ladder timeout. activeName is
+                    // kept for a mid-connect disconnect
+                    // so a late CONNECTED still displays.
+                    val wasConnecting = isConnecting
+                    isConnecting = false
+                    isConnected = false
+                    if (!wasConnecting) activeName = null
+                    if (wasConnecting && lastError == null) {
+                        lastError = t("قطع شد هنگام اتصال", "Disconnected while connecting")
+                    }
+                    if (wasConnecting) {
+                        try {
+                            appCtx?.let {
+                                                            }
+                        } catch (_: Throwable) {}
                     }
                 }
                 "RECONNECTING", "RESOLVE", "WAIT", "AUTH", "GET_CONFIG", "ASSIGN_IP", "ADD_ROUTES", "TCP_CONNECT" -> {
@@ -134,20 +157,34 @@ object OvpnEngine {
 
     /** VpnService.prepare must run from an Activity;
      *  OpenVpnActivity handles requestCode 701. */
-    fun connect(activity: Activity, profile: OvpnProfile, callback: (Boolean) -> Unit) {
+    // 2.38: preserveChainProxy sits BEFORE callback so
+    // existing trailing-lambda calls keep compiling.
+    fun connect(activity: Activity, profile: OvpnProfile, preserveChainProxy: Boolean = false, callback: (Boolean) -> Unit) {
         // Stop any other VPN first (v2ray / WireGuard),
         // because Android allows only one VPN at a time.
         try {
             if (VpnClientService.isRunning) {
                 val stop = Intent(activity, VpnClientService::class.java)
                 stop.action = "STOP"
+                stop.putExtra("stop_gen", VpnClientService.sessionGen)
                 activity.startService(stop)
-                activity.stopService(Intent(activity, VpnClientService::class.java))
                 VpnClientService.isRunning = false
             }
         } catch (_: Throwable) {}
         // Stop a previous OpenVPN3 session.
+        // 2.38: disconnect() clears the chain proxy
+        // flags — a chain caller must keep them, or
+        // the service reads null and the "chain"
+        // connects DIRECT (the bug that made every
+        // OVPN chain decorative). Normal callers
+        // keep the old clearing behaviour.
+        val savedChainPort = chainProxyPort
+        val savedChainActive = chainProxyActive
         try { disconnect() } catch (_: Throwable) {}
+        if (preserveChainProxy) {
+            chainProxyPort = savedChainPort
+            chainProxyActive = savedChainActive
+        }
         lastError = null
         isConnected = false
         isConnecting = true
@@ -214,5 +251,7 @@ object OvpnEngine {
         isConnecting = false
         activeName = null
         pendingProfile3 = null
+        // survive a disconnect into a later startNow.
+        pendingProfile = null
     }
 }

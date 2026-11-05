@@ -22,8 +22,8 @@ import org.json.JSONObject
  *  here), root mode and LAN sharing (need a rooted
  *  device with iptables). */
 object VpnConfigBuilder {
-    private fun prefs(ctx: Context) =
-        ctx.getSharedPreferences("renamer_vpn", Context.MODE_PRIVATE)
+    private fun prefs(ctx: Context, prefsName: String = "renamer_vpn") =
+        ctx.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
 
     private fun str(p: android.content.SharedPreferences, key: String, def: String): String =
         p.getString(key, def) ?: def
@@ -43,8 +43,8 @@ object VpnConfigBuilder {
      *  the TUN with the Android Builder, so the parent
      *  should read this there. Reads the new "vpn_mtu"
      *  key first, falling back to the legacy "mtu". */
-    fun mtu(ctx: Context): Int =
-        intOr(prefs(ctx), "vpn_mtu", intOr(prefs(ctx), "mtu", 1500))
+    fun mtu(ctx: Context, prefsName: String = "renamer_vpn"): Int =
+        intOr(prefs(ctx, prefsName), "vpn_mtu", intOr(prefs(ctx, prefsName), "mtu", 1500))
 
     /** VPN interface address, same note as mtu(): the
      *  Android Builder in VpnClientService consumes
@@ -66,8 +66,8 @@ object VpnConfigBuilder {
     /** Local socks port. Dynamic proxy port (v2rayNG
      *  "dynamic port") means port 0: Xray picks a
      *  free port at runtime. */
-    fun socksPort(ctx: Context): Int {
-        val p = prefs(ctx)
+    fun socksPort(ctx: Context, prefsName: String = "renamer_vpn"): Int {
+        val p = prefs(ctx, prefsName)
         if (p.getBoolean("dynamic_proxy_port", false)) return 0
         return if (p.getBoolean("enable_local_proxy", false)) {
             intOr(p, "local_proxy_port", intOr(p, "socks_port", 10808))
@@ -81,9 +81,9 @@ object VpnConfigBuilder {
      *  is on. Socks listen follows allow_lan
      *  (v2rayNG: 0.0.0.0 when LAN sharing is allowed,
      *  127.0.0.1 otherwise). */
-    private fun vpnInbounds(ctx: Context, includeTun: Boolean): JSONArray {
-        val p = prefs(ctx)
-        val port = socksPort(ctx)
+    private fun vpnInbounds(ctx: Context, includeTun: Boolean, prefsName: String = "renamer_vpn"): JSONArray {
+        val p = prefs(ctx, prefsName)
+        val port = socksPort(ctx, prefsName)
         val socksUdp = p.getBoolean("socks_udp", true)
         val sniffingOn = p.getBoolean("enable_sniffing", true)
         val routeOnly = p.getBoolean("route_only", false)
@@ -93,7 +93,7 @@ object VpnConfigBuilder {
             arr.put(JSONObject().apply {
                 put("tag", "tun"); put("protocol", "tun")
                 put("settings", JSONObject().apply {
-                    put("name", "xray0"); put("MTU", mtu(ctx)); put("userLevel", 8)
+                    put("name", "xray0"); put("MTU", mtu(ctx, prefsName)); put("userLevel", 8)
                 })
                 put("sniffing", JSONObject().apply {
                     put("enabled", sniffingOn)
@@ -142,8 +142,8 @@ object VpnConfigBuilder {
      *  only when the user set one of its switches;
      *  hosts from prefs plus any extra pairs (used
      *  by pre-resolve "add to DNS Hosts"). */
-    private fun dnsObject(ctx: Context, extraHosts: Map<String, String>): JSONObject {
-        val p = prefs(ctx)
+    private fun dnsObject(ctx: Context, extraHosts: Map<String, String>, prefsName: String = "renamer_vpn"): JSONObject {
+        val p = prefs(ctx, prefsName)
         val dnsServers = mutableListOf<String>()
         if (p.getBoolean("enable_fake_dns", false)) dnsServers.add("fakedns")
         if (p.contains("remote_dns") || p.contains("domestic_dns")) {
@@ -182,8 +182,8 @@ object VpnConfigBuilder {
      *  makes the whole config fail to parse. The
      *  bypass_lan choice wins when explicitly set,
      *  otherwise the legacy routing_mode. */
-    private fun routingObject(ctx: Context): JSONObject {
-        val p = prefs(ctx)
+    private fun routingObject(ctx: Context, prefsName: String = "renamer_vpn"): JSONObject {
+        val p = prefs(ctx, prefsName)
         val bypass = if (p.contains("bypass_lan")) {
             str(p, "bypass_lan", "Bypass")
         } else if (str(p, "routing_mode", "bypass_private") == "global") {
@@ -225,8 +225,8 @@ object VpnConfigBuilder {
      *  ignores it): only for tls/reality security,
      *  skipped when a dialerProxy is present, and
      *  REALITY + tlshello becomes packets "1-3". */
-    private fun applyMuxAndFragment(ctx: Context, ob: JSONObject) {
-        val p = prefs(ctx)
+    private fun applyMuxAndFragment(ctx: Context, ob: JSONObject, prefsName: String = "renamer_vpn") {
+        val p = prefs(ctx, prefsName)
         val protocol = ob.optString("protocol", "").lowercase()
         val ss = ob.optJSONObject("streamSettings")
         val network = ss?.optString("network", "") ?: ""
@@ -301,25 +301,26 @@ object VpnConfigBuilder {
         proxies: JSONArray,
         includeTun: Boolean,
         extraHosts: Map<String, String>,
+        prefsName: String = "renamer_vpn",
         routingExtra: (JSONObject.() -> Unit)? = null,
         observatory: Pair<String, JSONObject>? = null
     ): String {
-        val p = prefs(ctx)
+        val p = prefs(ctx, prefsName)
         val logLevel = str(p, "log_level", "warning").takeIf { it.isNotBlank() } ?: "warning"
         return JSONObject().apply {
             put("log", JSONObject().apply { put("loglevel", logLevel) })
-            put("inbounds", vpnInbounds(ctx, includeTun))
+            put("inbounds", vpnInbounds(ctx, includeTun, prefsName))
             put("outbounds", JSONArray().apply {
                 for (i in 0 until proxies.length()) {
                     val ob = proxies.getJSONObject(i)
-                    applyMuxAndFragment(ctx, ob)
+                    applyMuxAndFragment(ctx, ob, prefsName)
                     put(ob)
                 }
                 put(JSONObject().apply { put("protocol", "freedom"); put("tag", "direct") })
                 put(JSONObject().apply { put("protocol", "blackhole"); put("tag", "block") })
             })
-            put("routing", routingObject(ctx).apply { routingExtra?.invoke(this) })
-            put("dns", dnsObject(ctx, extraHosts))
+            put("routing", routingObject(ctx, prefsName).apply { routingExtra?.invoke(this) })
+            put("dns", dnsObject(ctx, extraHosts, prefsName))
             // Live speed (v2rayNG PREF_SPEED_ENABLED):
             // the stats + policy.system objects Xray
             // needs for outbound uplink/downlink stats.
@@ -347,15 +348,16 @@ object VpnConfigBuilder {
         ctx: Context,
         header: String,
         includeTun: Boolean,
-        extraHosts: Map<String, String>
+        extraHosts: Map<String, String>,
+        prefsName: String = "renamer_vpn"
     ): String? {
-        val p = prefs(ctx)
+        val p = prefs(ctx, prefsName)
         val servers = VpnSubs.loadServers(ctx)
         val members = VpnSubs.groupMembers(servers, header).filter {
             !XraySpeedtest.isChain(it) && XraySpeedtest.outboundFor(it) != null
         }
         if (members.isEmpty()) return null
-        if (members.size == 1) return buildInternal(ctx, members[0], includeTun, extraHosts)
+        if (members.size == 1) return buildInternal(ctx, members[0], includeTun, extraHosts, prefsName)
         val tags = mutableListOf<String>()
         val proxies = JSONArray()
         for ((i, member) in members.withIndex()) {
@@ -365,7 +367,7 @@ object VpnConfigBuilder {
             tags += tag
             proxies.put(ob)
         }
-        if (tags.size < 2) return buildInternal(ctx, members[0], includeTun, extraHosts)
+        if (tags.size < 2) return buildInternal(ctx, members[0], includeTun, extraHosts, prefsName)
         val strategy = XraySpeedtest.groupStrategy(header)
         val observatory: Pair<String, JSONObject> = if (strategy == "leastLoad") {
             "burstObservatory" to JSONObject().apply {
@@ -386,7 +388,7 @@ object VpnConfigBuilder {
                 put("enableConcurrency", true)
             }
         }
-        return assemble(ctx, proxies, includeTun, extraHosts,
+        return assemble(ctx, proxies, includeTun, extraHosts, prefsName,
             routingExtra = {
                 put("balancers", JSONArray().put(JSONObject().apply {
                     put("tag", "balancer")
@@ -405,11 +407,12 @@ object VpnConfigBuilder {
      *  speed is on — everything else (outbounds,
      *  routing, dns) stays exactly as the user wrote
      *  it, because a custom config IS the config. */
-    private fun buildCustom(ctx: Context, cfg: String, includeTun: Boolean): String? {
+    private fun buildCustom(ctx: Context, cfg: String, includeTun: Boolean, prefsName: String = "renamer_vpn"): String? {
         return try {
             val json = JSONObject(cfg)
-            json.put("inbounds", vpnInbounds(ctx, includeTun))
-            val p = prefs(ctx)
+            json.put("inbounds", vpnInbounds(ctx, includeTun, prefsName))
+            val p = prefs(ctx, prefsName)
+
             if (p.getBoolean("show_speed", false)) {
                 if (!json.has("stats")) json.put("stats", JSONObject())
                 if (!json.has("policy")) {
@@ -429,20 +432,73 @@ object VpnConfigBuilder {
         ctx: Context,
         cfg: String,
         includeTun: Boolean,
-        extraHosts: Map<String, String>
+        extraHosts: Map<String, String>,
+        prefsName: String = "renamer_vpn"
     ): String? {
         return when {
-            XraySpeedtest.isGroup(cfg) -> buildBalancer(ctx, cfg, includeTun, extraHosts)
-            XraySpeedtest.isCustom(cfg) -> buildCustom(ctx, cfg, includeTun)
+            XraySpeedtest.isGroup(cfg) -> buildBalancer(ctx, cfg, includeTun, extraHosts, prefsName)
+            XraySpeedtest.isCustom(cfg) -> buildCustom(ctx, cfg, includeTun, prefsName)
             else -> {
                 val proxies = XraySpeedtest.outboundsFor(cfg) ?: return null
-                assemble(ctx, proxies, includeTun, extraHosts)
+                assemble(ctx, proxies, includeTun, extraHosts, prefsName)
             }
         }
     }
 
-    fun build(ctx: Context, cfg: String, extraHosts: Map<String, String> = emptyMap()): String? {
-        return buildInternal(ctx, cfg, includeTun = true, extraHosts)
+    /** Engine standby balancer (2.5): the
+     *  winning primary plus up to 2 healthy
+     *  runners-up behind one leastLoad balancer,
+     *  watched by burstObservatory — a dead
+     *  primary fails over without restarting
+     *  the TUN. Returns null on any problem
+     *  (the caller keeps the single build).
+     *  Chain and JSON (warp/custom) links are
+     *  never balancer members. */
+    fun buildEngineBalancer(ctx: Context, primaryLink: String, standbyLinks: List<String>, includeTun: Boolean): String? {
+        return try {
+            if (primaryLink.startsWith("CHAIN::") || primaryLink.trimStart().startsWith("{")) return null
+            val primary = XraySpeedtest.outboundFor(primaryLink) ?: return null
+            primary.put("tag", "proxy")
+            val proxies = JSONArray().put(primary)
+            val tags = mutableListOf("proxy")
+            for ((i, s) in standbyLinks.take(2).withIndex()) {
+                if (s.startsWith("CHAIN::") || s.trimStart().startsWith("{")) continue
+                val ob = XraySpeedtest.outboundFor(s) ?: continue
+                val tag = "e${i + 1}"
+                ob.put("tag", tag)
+                tags += tag
+                proxies.put(ob)
+            }
+            if (tags.size < 2) return null
+            val observatory = "burstObservatory" to JSONObject().apply {
+                put("subjectSelector", JSONArray().apply { for (t in tags) put(t) })
+                put("pingConfig", JSONObject().apply {
+                    put("destination", delayTestUrl(ctx))
+                    put("httpMethod", "HEAD")
+                    put("interval", "1m")
+                    put("sampling", 2)
+                    put("timeout", "30s")
+                })
+            }
+            assemble(ctx, proxies, includeTun, emptyMap(),
+                routingExtra = {
+                    put("balancers", JSONArray().put(JSONObject().apply {
+                        put("tag", "balancer")
+                        put("selector", JSONArray().apply { for (t in tags) put(t) })
+                        put("strategy", JSONObject().apply { put("type", "leastLoad") })
+                    }))
+                    put("final", "balancer")
+                },
+                observatory = observatory)
+        } catch (_: Exception) { null }
+    }
+
+    fun build(ctx: Context, cfg: String, extraHosts: Map<String, String> = emptyMap(), prefsName: String = "renamer_vpn"): String? {
+        // A non-shared prefs file is migrated once from the
+        // shared file, so a section's first isolated build
+        // starts from the user's current values.
+        if (prefsName != "renamer_vpn") TunPrefs.migrateFileIfNeeded(ctx, prefsName)
+        return buildInternal(ctx, cfg, includeTun = true, extraHosts = extraHosts, prefsName = prefsName)
     }
 
     /** Pre-resolve method from the settings page. */

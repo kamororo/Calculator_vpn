@@ -42,6 +42,7 @@ class VpnSubActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             addView(Button(this@VpnSubActivity).apply {
                 text = "←"
+                
                 setOnClickListener { finish() }
             })
             addView(TextView(this@VpnSubActivity).apply {
@@ -61,12 +62,14 @@ class VpnSubActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             addView(Button(this@VpnSubActivity).apply {
                 text = L("+ افزودن ساب", "+ Add subscription")
+                
                 setOnClickListener {
                     startActivity(Intent(this@VpnSubActivity, VpnSubEditActivity::class.java))
                 }
             })
             addView(Button(this@VpnSubActivity).apply {
                 text = L("به‌روزرسانی همه", "Update all")
+                
                 setPadding((12 * d).toInt(), 0, 0, 0)
                 setOnClickListener { updateAll() }
             })
@@ -105,9 +108,9 @@ class VpnSubActivity : Activity() {
                 setPadding((12 * d).toInt(), (12 * d).toInt(), (12 * d).toInt(), (12 * d).toInt())
                 background = android.graphics.drawable.GradientDrawable().apply {
                     shape = android.graphics.drawable.GradientDrawable.RECTANGLE
-                    cornerRadius = 16 * d
+                    cornerRadius = 16 * resources.displayMetrics.density
                     setColor(Color.parseColor("#F2F5F9"))
-                    setStroke((2 * d).toInt(), Color.parseColor("#4A5A7A"))
+                    setStroke(1, Color.parseColor("#4A5A7A"))
                 }
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
@@ -152,6 +155,7 @@ class VpnSubActivity : Activity() {
             }
             actions.addView(Button(this).apply {
                 text = "↗"
+                
                 setOnClickListener {
                     try {
                         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -162,6 +166,7 @@ class VpnSubActivity : Activity() {
             })
             actions.addView(Button(this).apply {
                 text = "✎"
+                
                 setOnClickListener {
                     startActivity(Intent(this@VpnSubActivity, VpnSubEditActivity::class.java)
                         .putExtra("url", item.url))
@@ -169,6 +174,7 @@ class VpnSubActivity : Activity() {
             })
             actions.addView(Button(this).apply {
                 text = "✕"
+                
                 setOnClickListener {
                     android.app.AlertDialog.Builder(this@VpnSubActivity)
                         .setTitle(L("حذف سابسکریبشن", "Delete subscription"))

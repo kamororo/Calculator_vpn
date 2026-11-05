@@ -46,6 +46,17 @@ object ChainEngine {
 
     data class Hop(val type: String, val ref: String, val label: String)
 
+    // 2.16: in-memory chain log (like WG's), behind
+    // the top log icon. Outcomes only, never configs.
+    private val logLines = ArrayDeque<String>()
+    fun log(msg: String) {
+        val tm = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+        logLines.addLast("$tm  $msg")
+        while (logLines.size > 100) logLines.removeFirst()
+    }
+    fun logText(): String = logLines.joinToString("\n")
+    fun clearLog() { logLines.clear() }
+
     fun prefs(ctx: Context) =
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -76,7 +87,10 @@ object ChainEngine {
         if (!prefs(ctx).getBoolean("chain_running", false)) return false
         return when (prefs(ctx).getString("chain_mode", "")) {
             "xray" -> VpnClientService.isRunning
-            "ovpn" -> OvpnEngine.isConnected
+            // 2.38: during "connecting" the chain IS
+            // running — otherwise tapping the button
+            // restarts instead of stopping.
+            "ovpn" -> (OvpnEngine.isConnected || OvpnEngine.isConnecting)
             else -> false
         }
     }
@@ -93,7 +107,13 @@ object ChainEngine {
      *  best emergency config. */
     fun hopLink(ctx: Context, hop: Hop): String? {
         return when (hop.type) {
-            "v2ray" -> hop.ref.takeIf { it.contains("://") }
+            // 2.40: custom JSON configs have no "://"
+            // but ARE valid v2ray hops (their proxy
+            // outbound is extracted by
+            // customProxyOutbound) — rejecting them
+            // made every custom-hop chain fail
+            // instantly at build time.
+            "v2ray" -> hop.ref.takeIf { it.contains("://") || XraySpeedtest.isCustom(it) }
             "emergency" -> try {
                 EmergencyConnect.sortedConfigs(ctx).firstOrNull()
             } catch (_: Throwable) { null }
@@ -144,6 +164,7 @@ object ChainEngine {
             val allowed = mutableListOf<String>()
             var keepAlive = 0
             var psk = ""
+            var reservedRaw = ""
             for (raw in conf.lines()) {
                 val line = raw.trim()
                 if (line.startsWith("[")) {
@@ -162,11 +183,50 @@ object ChainEngine {
                     section.contains("Peer") && k == "AllowedIPs" -> allowed += v.split(",").map { it.trim() }.filter { it.isNotBlank() }
                     section.contains("Peer") && k == "PersistentKeepalive" -> keepAlive = v.toIntOrNull() ?: 0
                     section.contains("Peer") && k == "PresharedKey" -> psk = v
+                    section.contains("Interface") && k == "Reserved" -> reservedRaw = v
                 }
             }
             if (priv.isBlank() || pub.isBlank() || endpoint.isBlank()) return null
             if (addr.isBlank()) addr = "10.0.0.2/32"
             if (allowed.isEmpty()) allowed += "0.0.0.0/0"
+            // 2.60: pre-resolve a DOMAIN endpoint to
+            // an IP before handing it to Xray. The
+            // WireGuard device resolves its peer
+            // through Go's resolver, which on
+            // Android often cannot use the system
+            // DNS — so a domain endpoint silently
+            // never handshakes, and the chain (and
+            // the WG test, which shares this
+            // builder) looks connected but carries
+            // no traffic, while the same tunnel
+            // connects fine directly (the system
+            // backend resolves via Android DNS).
+            // WireGuard has no SNI, so pinning the
+            // resolved IP is cryptographically
+            // safe; on any failure the domain is
+            // kept exactly as before. Runs only on
+            // chain-start / test threads, never UI.
+            val effEndpoint = try {
+                val host: String
+                val port: String
+                if (endpoint.startsWith("[")) {
+                    host = endpoint.substringAfter("[").substringBefore("]")
+                    port = endpoint.substringAfter("]:", "")
+                } else {
+                    host = endpoint.substringBeforeLast(":")
+                    port = endpoint.substringAfterLast(":", "")
+                }
+                val isIp = host.matches(Regex("^[0-9]{1,3}(\\.[0-9]{1,3}){3}$")) || host.contains(":")
+                if (!isIp && port.isNotBlank()) {
+                    val addrs = java.net.InetAddress.getAllByName(host)
+                    val v4 = addrs.firstOrNull { it.hostAddress?.contains(".") == true && !it.hostAddress!!.contains(":") }
+                    val picked = v4 ?: addrs.firstOrNull()
+                    if (picked?.hostAddress != null) {
+                        val ip = picked.hostAddress!!
+                        if (ip.contains(":")) "[$ip]:$port" else "$ip:$port"
+                    } else endpoint
+                } else endpoint
+            } catch (_: Exception) { endpoint }
             JSONObject().apply {
                 put("protocol", "wireguard")
                 put("tag", tag)
@@ -176,13 +236,46 @@ object ChainEngine {
                     put("mtu", 1420)
                     put("peers", JSONArray().put(JSONObject().apply {
                         put("publicKey", pub)
-                        put("endpoint", endpoint)
+                        put("endpoint", effEndpoint)
                         put("allowedIPs", JSONArray().apply {
                             for (a in allowed) put(a)
                         })
                         if (keepAlive > 0) put("keepAlive", keepAlive)
                         if (psk.isNotBlank()) put("preSharedKey", psk)
                     }))
+                    // 2.51: Xray's WireGuard settings take
+                    // "reserved" (exactly 3 bytes, base64
+                    // in JSON). Our builder dropped it, so
+                    // a server expecting reserved bytes
+                    // rejected the handshake — the chain
+                    // looked connected but carried no
+                    // traffic. Conf forms: "1, 2, 3" |
+                    // base64 | hex; anything else keeps
+                    // the old behaviour (omitted).
+                    val reservedB64: String? = try {
+                        val bytes: ByteArray? = when {
+                            reservedRaw.contains(",") -> {
+                                val parts = reservedRaw.split(",").map { it.trim().toIntOrNull() ?: -1 }
+                                if (parts.size == 3 && parts.all { it in 0..255 }) {
+                                    parts.map { it.toByte() }.toByteArray()
+                                } else null
+                            }
+                            reservedRaw.isNotBlank() -> {
+                                try {
+                                    val d = android.util.Base64.decode(reservedRaw, android.util.Base64.DEFAULT)
+                                    if (d.size == 3) d else null
+                                } catch (_: Exception) {
+                                    val h = reservedRaw.trim()
+                                    if (h.length == 6 && h.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }) {
+                                        ByteArray(3) { i -> h.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+                                    } else null
+                                }
+                            }
+                            else -> null
+                        }
+                        bytes?.let { android.util.Base64.encodeToString(it, android.util.Base64.NO_WRAP) }
+                    } catch (_: Exception) { null }
+                    if (reservedB64 != null) put("reserved", reservedB64)
                 })
             }
         } catch (_: Exception) { null }
@@ -284,6 +377,23 @@ object ChainEngine {
         return try {
             if (!CoreInit.init(ctx)) return false
             stopProxyCore()
+            // Wait until the old core really
+            // released 10810 (shutdown is async):
+            // starting a new core while the old
+            // listener lingers makes the new core's
+            // HTTP inbound fail to bind, and the
+            // OVPN client then dials a stale or
+            // half-dead proxy — the "connected once,
+            // never again" chain symptom.
+            val freeDeadline = System.currentTimeMillis() + 3000
+            while (System.currentTimeMillis() < freeDeadline) {
+                try {
+                    val s = java.net.Socket()
+                    s.connect(java.net.InetSocketAddress("127.0.0.1", PROXY_HTTP_PORT), 200)
+                    s.close()
+                    Thread.sleep(200)
+                } catch (_: Exception) { break }
+            }
             val c = Libv2ray.newCoreController(object : libv2ray.CoreCallbackHandler {
                 override fun onEmitStatus(code: Long, message: String?): Long = 0
                 override fun shutdown(): Long = 0
@@ -291,10 +401,22 @@ object ChainEngine {
             })
             // No TUN here: this core is a loopback proxy
             // only, so there is no fd to hand over.
-            c.startLoop(config, -1)
+            // 2.57: startLoop RETURNS once the core
+            // is running (it does not block — the
+            // old "blocking startLoop" comment was
+            // wrong), so the controller MUST be kept:
+            // the old code nulled it right after
+            // startLoop returned, which made
+            // stopProxyCore a no-op forever and
+            // leaked every proxy core — and its
+            // 10810 listener — past its session.
             proxyController = c
+            c.startLoop(config, -1)
             true
-        } catch (_: Throwable) { false }
+        } catch (_: Throwable) {
+            proxyController = null
+            false
+        }
     }
 
     fun stopProxyCore() {
@@ -306,10 +428,9 @@ object ChainEngine {
      *  chain proxy core) and clear chain state. */
     fun stopAll(ctx: Context) {
         try {
-            val stop = Intent(ctx, VpnClientService::class.java).apply { action = "STOP" }
+            val stop = Intent(ctx, VpnClientService::class.java).apply { action = "STOP" ; putExtra("stop_gen", VpnClientService.sessionGen) }
             ctx.startService(stop)
         } catch (_: Exception) {}
-        try { ctx.stopService(Intent(ctx, VpnClientService::class.java)) } catch (_: Exception) {}
         VpnClientService.isRunning = false
         VpnClientService.currentName = null
         try { WgDirect.disconnect(ctx) } catch (_: Throwable) {}

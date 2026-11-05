@@ -25,6 +25,7 @@ class HydraOptionsActivity : Activity() {
     private lateinit var maxEndpointsEdit: EditText
     private lateinit var budgetEdit: EditText
     private lateinit var swFragment: Switch
+    private lateinit var swDesync: Switch
     private lateinit var swFingerprint: Switch
     private lateinit var swAlpn: Switch
     private lateinit var swWs: Switch
@@ -155,6 +156,9 @@ class HydraOptionsActivity : Activity() {
         }
         swFragment = switchRow(L("شکل‌های Fragment (چند الگوی تکه‌تکه کردن بسته‌ها)",
             "Fragment shapes (several packet-fragmentation patterns)"), opts.useFragment)
+        swDesync = switchRow(L("دی‌سینک پیشرفته‌ی هیدرا: اول شکل‌های دی‌سینک (۹ شکل؛ کلاسیک اول، بقیه با پارامتر تصادفی در هر تلاش) امتحان شوند؛ فقط همین بخش",
+            "Hydra advanced desync: try desync shapes first (9 shapes; classic first, the rest randomized per attempt); only this section"),
+            opts.useDesync)
         swFingerprint = switchRow(L("شکل‌های اثر انگشت TLS (کروم، فایرفاکس، سافاری، تصادفی)",
             "TLS fingerprint shapes (Chrome, Firefox, Safari, randomized)"), opts.useFingerprint)
         swAlpn = switchRow(L("شکل‌های ALPN (h2، http/1.1، هیچ‌کدام)",
@@ -211,6 +215,7 @@ class HydraOptionsActivity : Activity() {
                 maxEndpoints = maxEndpointsEdit.text.toString().toIntOrNull() ?: 3,
                 budgetSec = budgetEdit.text.toString().toIntOrNull() ?: 90,
                 useFragment = swFragment.isChecked,
+                useDesync = swDesync.isChecked,
                 useFingerprint = swFingerprint.isChecked,
                 useAlpn = swAlpn.isChecked,
                 useWs = swWs.isChecked,

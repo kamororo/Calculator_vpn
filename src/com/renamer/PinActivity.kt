@@ -5,7 +5,12 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.Bundle
+import android.os.SystemClock
 import android.view.Gravity
 import android.view.View
 import android.widget.*
@@ -14,15 +19,29 @@ import android.widget.*
  * The lock page is a full-screen calculator. It works as a
  * normal calculator for any calculation.
  *
- * Secret unlock, two ways, both end with "=":
- *   <private PIN> =   -> private (all sections)
- *   <public PIN> =    -> public (public section only)
- *   = <private PIN> = -> private
- *   = <public PIN> =  -> public
- * (The default PINs live in the companion below; change
- *  them before distributing your own build.)
+ * Secret unlock: PINs end with "=":
+ *   1111 =   -> private (all sections)
+ *   0000 =   -> public (public section only)
+ *   = 1111 = -> private
+ *   = 0000 = -> public
  * Anything else just calculates; no PIN is ever named on
  * this page, and a wrong code simply shows its result.
+ *
+ * 1.82 shake unlock (prefs in LoginPersonalizationActivity):
+ *   password       = PIN only (default)
+ *   password_shake = correct PIN, then shake the phone N times;
+ *                    the PIN alone never opens anything
+ *   shake_only     = shake N times, no PIN, opens PUBLIC only
+ *   passwordless   = straight to PUBLIC (PINs kept)
+ * "Shake" is the USER shaking the phone (accelerometer), not
+ * the phone vibrating. The private section opens ONLY with a
+ * password; shaking alone can never open it.
+ *
+ * NOTE (2026-10-28): this file was rebuilt from the 1.81
+ * compiled class after a failed patch script truncated the
+ * source to 0 bytes. Logic was recovered from javap output
+ * of out/classes.jar (1.81 build) plus the known 1.81 reads;
+ * the 1.82 shake change is applied on top of that recovery.
  */
 class PinActivity : Activity() {
     companion object {
@@ -33,7 +52,6 @@ class PinActivity : Activity() {
         const val MODE_PUBLIC = "public"
     }
 
-    private lateinit var exprText: TextView
     private lateinit var mainText: TextView
 
     // Current expression being built, e.g. "12+3".
@@ -44,16 +62,104 @@ class PinActivity : Activity() {
     private var justEvaluated = false
     private var freshEntry = true
 
+    // ---------- 1.82 shake unlock ----------
+    // Pending mode after a correct PIN in password_shake mode;
+    // cleared on pause and 30s after the PIN.
+    private var pendingShakeMode: String? = null
+    private var pendingShakeMs = 0L
+    private var shakeCount = 0
+    private var shakeWindowStart = 0L
+    private var lastShakeMs = 0L
+    private var sensorMgr: SensorManager? = null
+    private val shakeListener = object : SensorEventListener {
+        override fun onAccuracyChanged(s: Sensor?, a: Int) {}
+        override fun onSensorChanged(e: SensorEvent) {
+            val x = e.values[0]; val y = e.values[1]; val z = e.values[2]
+            val g = kotlin.math.sqrt(x * x + y * y + z * z) / 9.81f
+            if (g < 1.8f) return
+            val now = SystemClock.uptimeMillis()
+            if (now - lastShakeMs < 400) return
+            lastShakeMs = now
+            val mode = unlockMode()
+            if (mode == "password_shake") {
+                if (pendingShakeMode == null) return
+                if (now - pendingShakeMs > 30000) { pendingShakeMode = null; return }
+            } else if (mode != "shake_only") return
+            if (now - shakeWindowStart > 5000) { shakeCount = 0; shakeWindowStart = now }
+            shakeCount++
+            vibrateTick()
+            if (shakeCount >= shakeTarget()) {
+                shakeCount = 0
+                when (mode) {
+                    "shake_only" -> openMode(MODE_PUBLIC)
+                    "password_shake" -> {
+                        val m = pendingShakeMode; pendingShakeMode = null
+                        if (m != null) openMode(m)
+                    }
+                }
+                expr = ""; currentNumber = ""
+                justEvaluated = false; freshEntry = true
+                refreshDisplay()
+            }
+        }
+    }
+
+    // ---------- unlock options (prefs written
+    // by LoginPersonalizationActivity) ----------
+    private fun unlockMode(): String =
+        getSharedPreferences("renamer_settings", MODE_PRIVATE).getString("unlock_mode", "password") ?: "password"
+
+    // 1.81's "unlock_vibrate_count" (haptic pulses) is no longer
+    // read: 1.82 replaces it with a shake COUNT, its own pref.
+    private fun shakeTarget(): Int =
+        getSharedPreferences("renamer_settings", MODE_PRIVATE)
+            .getInt("unlock_shake_count", 3).coerceIn(1, 5)
+
+    private fun openMode(mode: String) {
+        // 2.18: the welcome page can be switched off
+        // from Personalization ("show_welcome", default
+        // on); when off, go straight Home with the
+        // same mode extra.
+        val target = if (getSharedPreferences("renamer_settings", MODE_PRIVATE)
+            .getBoolean("show_welcome", true)) {
+            WelcomeActivity::class.java
+        } else {
+            HomeActivity::class.java
+        }
+        startActivity(Intent(this, target).apply {
+            putExtra(EXTRA_MODE, mode)
+        })
+    }
+
+    /** One short haptic tick: feedback that a shake was counted.
+     *  Never blocks the unlock on failure. */
+    private fun vibrateTick() {
+        try {
+            val vib = if (android.os.Build.VERSION.SDK_INT >= 31) {
+                getSystemService(android.os.VibratorManager::class.java)?.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                getSystemService(VIBRATOR_SERVICE) as? android.os.Vibrator
+            } ?: return
+            if (!vib.hasVibrator()) return
+            if (android.os.Build.VERSION.SDK_INT >= 26) {
+                vib.vibrate(android.os.VibrationEffect.createOneShot(60, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                @Suppress("DEPRECATION")
+                vib.vibrate(60)
+            }
+        } catch (_: Exception) {}
+    }
+
     private fun glassButton(label: String, accent: Boolean, sizePx: Int, onClick: () -> Unit): Button {
         return Button(this).apply {
             text = label
             textSize = 24f
             typeface = Typeface.DEFAULT_BOLD
-            // Soft light calculator: dark-gray text on
-            // translucent white keys, so it stays readable
-            // on the pastel background. The "=" key gets a
-            // soft green tint instead of a saturated color.
-            setTextColor(CalcTheme.theme(this@PinActivity).buttonText)
+            // 2.48 studio: normal keys use the
+            // background-aware text colour, the "="
+            // key uses the accent-readable colour.
+            setTextColor(if (accent) CalcTheme.accentTextColor(this@PinActivity) else CalcTheme.keyTextColor(this@PinActivity))
             elevation = 4f
             background = CalcTheme.buttonBackground(this@PinActivity, accent)
             layoutParams = LinearLayout.LayoutParams(sizePx, sizePx)
@@ -88,12 +194,21 @@ class PinActivity : Activity() {
             showLockScreen()
             return
         }
+        // 1.81 unlock modes: passwordless opens
+        // straight into the PUBLIC section only;
+        // the PINs are kept, so switching back to
+        // "with password" restores them as-is.
+        if (unlockMode() == "passwordless") {
+            openMode(MODE_PUBLIC)
+            finish()
+            return
+        }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(24, 24, 24, 16)
             // Soft light pastel gradient, much lighter
             // and calmer than the old dark blue-teal one.
-            background = CalcTheme.gradient(this@PinActivity)
+            background = CalcTheme.background(this@PinActivity)
         }
         // Calculator display: expression on top, big result
         // below. This is the whole "screen" of the calculator.
@@ -112,11 +227,6 @@ class PinActivity : Activity() {
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
             )
         }
-        exprText = TextView(this).apply {
-            text = ""; textSize = 18f
-            setTextColor(Color.parseColor("#777777"))
-            gravity = Gravity.END
-        }
         mainText = TextView(this).apply {
             text = "0"; textSize = 52f
             typeface = when (CalcTheme.displayFont(this@PinActivity)) {
@@ -124,11 +234,13 @@ class PinActivity : Activity() {
                 "normal" -> Typeface.DEFAULT
                 else -> Typeface.DEFAULT_BOLD
             }
-            setTextColor(CalcTheme.theme(this@PinActivity).display)
+            setTextColor(CalcTheme.displayColor(this@PinActivity))
             gravity = Gravity.END
         }
-        display.addView(exprText)
         display.addView(mainText)
+        // 1.82: no on-screen unlock gesture here. Shaking is
+        // sensed by the accelerometer (see shakeListener);
+        // the display stays a plain calculator display.
         root.addView(display)
 
         // Circular buttons: a square whose side is one
@@ -145,8 +257,8 @@ class PinActivity : Activity() {
             listOf("1" to false, "2" to false, "3" to false, "+" to false),
             listOf("±" to false, "0" to false, "." to false, "=" to true)
         )
-        for (rowDef in rows) {
-            val row = LinearLayout(this).apply {
+        for (row in rows) {
+            val rowLayout = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER
                 layoutParams = LinearLayout.LayoutParams(
@@ -154,72 +266,50 @@ class PinActivity : Activity() {
                     LinearLayout.LayoutParams.WRAP_CONTENT
                 )
             }
-            for ((label, accent) in rowDef) {
-                row.addView(glassButton(label, accent, btnSize) { onKey(label) })
+            for ((label, accent) in row) {
+                rowLayout.addView(glassButton(label, accent, btnSize) { onKey(label) })
             }
-            root.addView(row)
+            root.addView(rowLayout)
         }
         root.addView(TextView(this).apply {
-            text = "created by : kamyar"; textSize = 13f
+            text = "created by : kamyar"
+            textSize = 13f
             gravity = Gravity.CENTER
             setTextColor(Color.parseColor("#888888"))
-            setPadding(0, 10, 0, 0)
+            setPadding(0, 8, 0, 8)
         })
         setContentView(root)
         root.fitsSystemWindows = true
     }
 
-    /** Whole-app lock screen: only the lock message and
-     *  a field for the creator's entry password. A correct
-     *  entry unlocks the app; anything else leaves it
-     *  locked. Uninstall + reinstall (or clear data) is
-     *  the other way out, because it wipes the lock flag. */
-    private fun showLockScreen() {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setPadding(48, 48, 48, 48)
-            setBackgroundColor(Color.parseColor("#1A1A1A"))
-        }
-        root.addView(TextView(this).apply {
-            text = AppLock.message(this@PinActivity)
-            textSize = 18f
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            setPadding(0, 0, 0, 32)
-        })
-        val input = EditText(this).apply {
-            hint = AppLanguage.t(this@PinActivity, "رمز ورود", "Entry password")
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or
-                android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
-            setTextColor(Color.WHITE)
-        }
-        root.addView(input)
-        root.addView(Button(this).apply {
-            text = AppLanguage.t(this@PinActivity, "ورود", "Enter")
-            setOnClickListener {
-                val pw = input.text.toString().trim()
-                if (pw.isBlank()) return@setOnClickListener
-                if (AppLock.unlock(this@PinActivity, pw)) {
-                    recreate()
-                } else {
-                    input.setText("")
-                    input.hint = AppLanguage.t(this@PinActivity, "رمز اشتباه است", "Wrong password")
+    override fun onResume() {
+        super.onResume()
+        if (unlockMode() == "password_shake" || unlockMode() == "shake_only") {
+            try {
+                val sm = getSystemService(SENSOR_SERVICE) as? SensorManager
+                sensorMgr = sm
+                sm?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
+                    sm.registerListener(shakeListener, it, SensorManager.SENSOR_DELAY_UI)
                 }
-            }
-        })
-        setContentView(root)
-        root.fitsSystemWindows = true
+            } catch (_: Exception) {}
+        }
+    }
+
+    override fun onPause() {
+        try { sensorMgr?.unregisterListener(shakeListener) } catch (_: Exception) {}
+        sensorMgr = null
+        pendingShakeMode = null
+        super.onPause()
     }
 
     private fun refreshDisplay() {
-        exprText.text = expr
         mainText.text = if (currentNumber.isNotEmpty()) currentNumber
-                        else if (expr.isNotEmpty()) expr else "0"
+                        else if (expr.isNotEmpty()) expr
+                        else "0"
     }
 
-    private fun onKey(k: String) {
-        when (k) {
+    private fun onKey(key: String) {
+        when (key) {
             "C" -> {
                 expr = ""; currentNumber = ""
                 justEvaluated = false; freshEntry = true
@@ -234,16 +324,16 @@ class PinActivity : Activity() {
             "=" -> onEquals()
             "+", "−", "×", "÷" -> {
                 if (currentNumber.isEmpty() && expr.isEmpty()) {
-                    // "=" then an operator: keep calculating
-                    // from the shown result, if any.
-                    if (mainText.text.toString() != "0") {
-                        expr = mainText.text.toString()
-                        currentNumber = expr
-                    } else return
+                    if (mainText.text == "0") return
+                    expr = mainText.text.toString()
+                    currentNumber = expr
                 }
                 if (currentNumber.isEmpty()) return
-                expr += when (k) {
-                    "−" -> "-"; "×" -> "*"; "÷" -> "/"; else -> k
+                expr += when (key) {
+                    "−" -> "-"
+                    "×" -> "*"
+                    "÷" -> "/"
+                    else -> key
                 }
                 currentNumber = ""
                 justEvaluated = false
@@ -258,10 +348,9 @@ class PinActivity : Activity() {
             }
             "±" -> {
                 if (currentNumber.isEmpty()) return
-                val r = if (currentNumber.startsWith("-")) currentNumber.drop(1)
-                        else "-$currentNumber"
-                expr = expr.dropLast(currentNumber.length) + r
-                currentNumber = r
+                val new = if (currentNumber.startsWith("-")) currentNumber.drop(1) else "-$currentNumber"
+                expr = expr.dropLast(currentNumber.length) + new
+                currentNumber = new
             }
             "." -> {
                 if (currentNumber.contains(".")) return
@@ -275,37 +364,47 @@ class PinActivity : Activity() {
                 }
                 justEvaluated = false
             }
-            else -> { // digit
+            else -> {
                 if (justEvaluated) {
-                    // After "=", a fresh number starts a new
-                    // calculation (or a secret code, see onEquals).
                     expr = ""; currentNumber = ""
                     justEvaluated = false
                 }
                 if (freshEntry && currentNumber.isEmpty()) freshEntry = false
                 if (currentNumber.length >= 12) return
-                // Keep the exact typed string, so "0000"
-                // stays "0000" and unlocks as a code.
-                currentNumber += k
-                expr += k
+                currentNumber += key
+                expr += key
             }
         }
-        if (k == "=") return // onEquals already set the display
         refreshDisplay()
     }
 
     private fun onEquals() {
         // "=" with nothing typed just arms the next code
-        // entry (the first "=" of "= <PIN> =").
+        // entry (the first "=" of "= 1111 =").
         if (expr.isEmpty()) {
             justEvaluated = true
             refreshDisplay()
             return
         }
         // Secret codes: a bare number, typed either as
-        // "<PIN> =" or after a previous "=" ("= <PIN> =").
-        val code = if (expr.isNotEmpty() && currentNumber == expr) currentNumber
-                   else if (justEvaluated) currentNumber else null
+        // "1111 =" or after a previous "=" ("= 1111 =").
+        // Fix: after an evaluation, the displayed
+        // result is NOT a freshly typed code. A second
+        // "=" must never re-check it as a PIN -- a code
+        // counts only when typed since the last
+        // evaluation (digit entry already clears
+        // justEvaluated, and the "= 1111 =" arming
+        // press returns early above, so justEvaluated
+        // here can only mean "this value is an
+        // evaluation result").
+        val skipCodeCheck = justEvaluated
+        val code = if (skipCodeCheck) null
+                   else if (expr.isNotEmpty() && currentNumber == expr) currentNumber
+                   else null
+        if (skipCodeCheck && expr.isNotEmpty()) {
+            try {
+                            } catch (_: Exception) {}
+        }
         val publicPin = getSharedPreferences("renamer_settings", MODE_PRIVATE)
             .getString("public_pin", null)?.takeIf { it.length == 4 } ?: PIN_PUBLIC
         val mode = when (code) {
@@ -314,10 +413,19 @@ class PinActivity : Activity() {
             else -> null
         }
         if (mode != null) {
-            val intent = Intent(this, WelcomeActivity::class.java).apply {
-                putExtra(EXTRA_MODE, mode)
+            // 1.82: in password+shake mode the PIN alone
+            // never opens anything: the user must shake the
+            // phone shakeTarget() times within 30s of the PIN.
+            if (unlockMode() == "password_shake") {
+                pendingShakeMode = mode
+                pendingShakeMs = SystemClock.uptimeMillis()
+                shakeCount = 0; shakeWindowStart = 0L
+                expr = ""; currentNumber = ""
+                justEvaluated = false; freshEntry = true
+                refreshDisplay()
+                return
             }
-            startActivity(intent)
+            openMode(mode)
             expr = ""; currentNumber = ""
             justEvaluated = false; freshEntry = true
             refreshDisplay()
@@ -325,14 +433,12 @@ class PinActivity : Activity() {
         }
         val result = evaluate(expr)
         if (result == null) {
-            exprText.text = expr
             mainText.text = AppLanguage.t(this@PinActivity, "خطا", "Error")
             expr = ""; currentNumber = ""
             justEvaluated = false; freshEntry = true
             return
         }
         val r = formatNumber(result)
-        exprText.text = "$expr ="
         mainText.text = r
         expr = r
         currentNumber = r
@@ -341,55 +447,95 @@ class PinActivity : Activity() {
     }
 
     private fun formatNumber(v: Double): String {
-        if (v.isNaN() || v.isInfinite()) return AppLanguage.t(this@PinActivity, "خطا", "Error")
-        val s = if (v == kotlin.math.floor(v) && kotlin.math.abs(v) < 1e12) {
-            v.toLong().toString()
-        } else {
-            "%.10f".format(v).trimEnd('0').trimEnd('.')
-        }
-        return s
+        if (v.isNaN() || v.isInfinite()) return AppLanguage.t(this, "خطا", "Error")
+        if (v == Math.floor(v) && Math.abs(v) < 1.0E12) return v.toLong().toString()
+        return String.format("%.10f", v).trimEnd('0').trimEnd('.')
     }
 
-    /** Evaluate + - * / with * / first, left to right. */
-    private fun evaluate(e: String): Double? {
-        if (e.isBlank()) return null
-        val tokens = mutableListOf<String>()
-        var num = ""
-        for (ch in e) {
-            if (ch.isDigit() || ch == '.') num += ch
-            else if (ch in "+-*/") {
-                if (num.isEmpty() && ch == '-' && tokens.isEmpty()) { num = "-"; continue }
-                if (num.isEmpty()) return null
-                tokens += num; num = ""
-                tokens += ch.toString()
-            } else return null
+    private fun evaluate(s: String): Double? {
+        if (s.isBlank()) return null
+        val tokens = ArrayList<String>()
+        var cur = ""
+        for (ch in s) {
+            if (ch.isDigit() || ch == '.') {
+                cur += ch
+            } else if (ch in "+-*/") {
+                if (ch == '-' && cur.isEmpty() && tokens.isEmpty()) {
+                    cur = "-"
+                } else {
+                    if (cur.isEmpty()) return null
+                    tokens.add(cur); cur = ""
+                    tokens.add(ch.toString())
+                }
+            } else {
+                return null
+            }
         }
-        if (num.isEmpty()) return null
-        tokens += num
-        // First pass: * and /
-        val pass = mutableListOf<String>()
+        if (cur.isEmpty()) return null
+        tokens.add(cur)
+        // First pass: * and / (left to right).
+        val out = ArrayList<String>()
         var i = 0
         while (i < tokens.size) {
             val t = tokens[i]
-            if ((t == "*" || t == "/") && pass.isNotEmpty()) {
-                val left = pass.removeAt(pass.size - 1).toDoubleOrNull() ?: return null
-                val right = tokens.getOrNull(i + 1)?.toDoubleOrNull() ?: return null
-                if (t == "/" && right == 0.0) return null
-                pass += formatNumber(if (t == "*") left * right else left / right)
+            if ((t == "*" || t == "/") && out.isNotEmpty()) {
+                val lhs = out.removeAt(out.size - 1).toDoubleOrNull() ?: return null
+                val rhs = tokens.getOrNull(i + 1)?.toDoubleOrNull() ?: return null
+                if (t == "/" && rhs == 0.0) return null
+                out.add(formatNumber(if (t == "*") lhs * rhs else lhs / rhs))
                 i += 2
             } else {
-                pass += t; i++
+                out.add(t)
+                i++
             }
         }
-        // Second pass: + and -
-        var result = pass[0].toDoubleOrNull() ?: return null
+        // Second pass: + and -.
+        var result = out[0].toDoubleOrNull() ?: return null
         i = 1
-        while (i < pass.size) {
-            val op = pass[i]
-            val v = pass.getOrNull(i + 1)?.toDoubleOrNull() ?: return null
-            result = if (op == "+") result + v else if (op == "-") result - v else return null
+        while (i < out.size) {
+            val op = out[i]
+            val rhs = out.getOrNull(i + 1)?.toDoubleOrNull() ?: return null
+            if (op == "+") result += rhs
+            else if (op == "-") result -= rhs
+            else return null
             i += 2
         }
         return result
+    }
+
+    private fun showLockScreen() {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(64, 64, 64, 64)
+            setBackgroundColor(Color.parseColor("#1A1A1A"))
+        }
+        root.addView(TextView(this).apply {
+            text = AppLock.message(this@PinActivity)
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 24)
+        })
+        val input = EditText(this).apply {
+            hint = AppLanguage.t(this@PinActivity, "رمز ورود", "Entry password")
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setTextColor(Color.WHITE)
+        }
+        root.addView(input)
+        root.addView(Button(this).apply {
+            text = AppLanguage.t(this@PinActivity, "ورود", "Enter")
+            setOnClickListener {
+                val v = input.text.toString().trim()
+                if (v.isNotBlank() && AppLock.unlock(this@PinActivity, v)) {
+                    recreate()
+                } else {
+                    input.setText("")
+                    input.hint = AppLanguage.t(this@PinActivity, "رمز اشتباه است", "Wrong password")
+                }
+            }
+        })
+        setContentView(root)
+        root.fitsSystemWindows = true
     }
 }

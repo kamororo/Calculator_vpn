@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Connect button, disconnected state: soft gray circle. -->
+<!-- 2.17: disconnected orb, soft blue. -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="oval">
-    <solid android:color="#D9DEE8" />
+    <gradient
+        android:type="radial"
+        android:gradientRadius="32dp"
+        android:centerColor="#E8EEF7"
+        android:endColor="#7E9CC9" />
 </shape>

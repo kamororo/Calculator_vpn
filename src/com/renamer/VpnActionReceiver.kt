@@ -64,9 +64,9 @@ class VpnActionReceiver : BroadcastReceiver() {
         try {
             val stop = Intent(ctx, VpnClientService::class.java).apply {
                 action = "STOP"
+                putExtra("stop_gen", VpnClientService.sessionGen)
             }
             try { ctx.startService(stop) } catch (_: Throwable) {}
-            try { ctx.stopService(Intent(ctx, VpnClientService::class.java)) } catch (_: Throwable) {}
         } catch (_: Throwable) {}
         VpnClientService.isRunning = false
         VpnClientService.currentName = null

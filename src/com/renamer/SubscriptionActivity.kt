@@ -23,6 +23,7 @@ import java.net.URL
 class SubscriptionActivity : Activity() {
     private fun L(fa: String, en: String): String = AppLanguage.t(this, fa, en)
     private lateinit var subsContainer: LinearLayout
+    private lateinit var addSubRow: LinearLayout
     private lateinit var toggleSubsBtn: Button
     private var subsVisible = false
     private lateinit var newSubF: EditText
@@ -36,11 +37,16 @@ class SubscriptionActivity : Activity() {
     // stored, so old and new subs start out selected).
     private val subNamesMap = mutableMapOf<String, String>()
     private val subDeselected = mutableSetOf<String>()
-    private lateinit var box1: EditText
-    private lateinit var box2: EditText
     private lateinit var nameF: EditText
+    // 2.52: no received/healthy boxes any more. Fetched
+    // configs live in memory + prefs only (background),
+    // and the healthy output is a read-only live view.
+    private var fetchedConfigs: MutableList<String> = mutableListOf()
+    private lateinit var copyBtn: Button
+    private lateinit var progressBar: ProgressBar
     private lateinit var statusText: TextView
     private lateinit var progressText: TextView
+    private lateinit var reportBtn: Button
     private lateinit var startBtn: Button
     private lateinit var stopBtn: Button
     private var coreInitDone = false
@@ -51,6 +57,11 @@ class SubscriptionActivity : Activity() {
     // page shows live progress even after leaving and returning.
     private val pollHandler = Handler(Looper.getMainLooper())
     private var polling = false
+    // on the last poll, and how many consecutive polls
+    // saw no change at all.
+    private var lastPollDone = -1
+    private var lastPollHealthy = -1
+    private var unchangedPolls = 0
     private val pollRunnable = object : Runnable {
         override fun run() {
             if (!polling) return
@@ -64,32 +75,54 @@ class SubscriptionActivity : Activity() {
 
     private fun prefs() = getSharedPreferences("renamer_subs", MODE_PRIVATE)
 
-    /** Persist box 1, the desired name, the healthy output and
+    /** Persist the fetched list, the desired name and
      *  lastHealthy, so returning to this page never clears
-     *  them. Only a fresh "update all" replaces box 1, and
-     *  only a fresh ping test replaces box 2. */
+     *  them. Only a fresh selected-subs update replaces
+     *  the fetched list, and only a fresh ping test
+     *  replaces the healthy output. */
     private fun saveState() {
         try {
+            val nm = try { nameF.text.toString() } catch (_: Exception) { "" }
             prefs().edit()
-                .putString("box1", box1.text.toString())
-                .putString("box2", box2.text.toString())
-                .putString("desired_name", nameF.text.toString())
+                .putString("fetched_list", fetchedConfigs.joinToString("\n"))
+                .putString("desired_name", nm)
                 .putString("last_healthy", lastHealthy.joinToString("\n"))
                 .apply()
         } catch (_: Exception) {}
     }
 
-    private fun loadState() {
+    // 2.22: fillBoxes=false restores only the lists;
+    // the heavy output fill is deferred by the
+    // caller until after the page appears, so a page
+    // holding thousands of configs opens instantly.
+    private fun loadState(fillBoxes: Boolean = true) {
         try {
-            val b1 = prefs().getString("box1", "") ?: ""
-            val b2 = prefs().getString("box2", "") ?: ""
+            val fetched = prefs().getString("fetched_list", "") ?: ""
+            val box1Pref = prefs().getString("box1", "") ?: ""
+            // The legacy box1 value is only a first-open
+            // fallback when the new list is empty, and it
+            // is cleared right after migrating so it can
+            // never shadow the new list again.
+            val useLegacy = fetched.isBlank() && box1Pref.isNotBlank()
+            val lines = (if (useLegacy) box1Pref else fetched)
+                .lines().map { it.trim() }.filter { it.isNotBlank() }
+            if (useLegacy) {
+                try {
+                    prefs().edit().putString("fetched_list", box1Pref)
+                        .putString("box1", "").apply()
+                                    } catch (_: Exception) {}
+            }
+            fetchedConfigs = lines.toMutableList()
             val nm = prefs().getString("desired_name", "") ?: ""
             val lh = prefs().getString("last_healthy", "") ?: ""
-            if (b1.isNotBlank()) box1.setText(b1)
-            if (b2.isNotBlank()) box2.setText(b2)
+            val b2 = prefs().getString("box2", "") ?: ""
             if (nm.isNotBlank()) nameF.setText(nm)
-            lastHealthy = lh.lines().map { it.trim() }.filter { it.isNotBlank() }
-            if (b1.isNotBlank() || b2.isNotBlank()) {
+            lastHealthy = (if (lh.isNotBlank()) lh else b2)
+                .lines().map { it.trim() }.filter { it.isNotBlank() }
+            if (fillBoxes) {
+                refreshCopyButton()
+            }
+            if (fetchedConfigs.isNotEmpty() || lastHealthy.isNotEmpty()) {
                 progressText.text = L("کانفیگ‌های قبلی بازیابی شدند؛ تا وقتی به‌روزرسانی نزنی، پاک نمی‌شوند.", "Previous configs were restored; they will not be deleted until you update.")
             }
         } catch (_: Exception) {}
@@ -116,6 +149,9 @@ class SubscriptionActivity : Activity() {
             // final result exactly once.
             applyFinishedTest()
         }
+        // 2.62: the report button follows stored report
+        // data even when nothing new finished.
+        updateReportBtn()
     }
 
     private fun startPolling() {
@@ -127,6 +163,20 @@ class SubscriptionActivity : Activity() {
     private fun stopPolling() {
         polling = false
         pollHandler.removeCallbacks(pollRunnable)
+    }
+
+    /** true when the ping foreground service is
+     *  really alive. On API 26+ this only lists our own
+     *  services, which is exactly what is needed here.
+     *  Any doubt returns true, so a live-but-slow test
+     *  is never reset by mistake. */
+    private fun isPingServiceRunning(): Boolean {
+        return try {
+            val am = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+            am.getRunningServices(Int.MAX_VALUE)?.any {
+                it.service.className == PingTestService::class.java.name
+            } == true
+        } catch (_: Exception) { true }
     }
 
     /** Reads the service's live progress prefs and updates the
@@ -148,25 +198,61 @@ class SubscriptionActivity : Activity() {
             val msg = L("تست پینگ متوقف شد.", "Ping test stopped.")
             progressText.text = msg
             statusText.text = msg
+            if (::progressBar.isInitialized) progressBar.visibility = View.GONE
+            refreshCopyButton()
             return
         }
         val done = p.getInt("ping_progress_done", 0)
         val total = p.getInt("ping_progress_total", 0)
         val healthy = p.getInt("ping_progress_healthy", 0)
-        progressText.text = L("در حال تست پینگ... $done از $total تست شد، $healthy سالم", "Testing ping... $done of $total tested, $healthy healthy")
-        val live = (p.getString("ping_healthy_live", "") ?: "")
-            .lines().map { it.trim() }.filter { it.isNotBlank() }
-        if (live.isNotEmpty()) {
-            val name = nameF.text.toString().trim()
-            val out = if (name.isBlank()) live else live.map { renameConfig(it, name) }
-            box2.setText(out.joinToString("\n"))
+        // nothing moved for several polls AND the service
+        // is not actually running any more (killed
+        // without onDestroy) -> reset the flag here, so
+        // Start is usable again. A live-but-slow service
+        // is never reset: the running check guards it.
+        if (done == lastPollDone && healthy == lastPollHealthy) {
+            unchangedPolls++
+        } else {
+            unchangedPolls = 0
+            lastPollDone = done
+            lastPollHealthy = healthy
         }
+        if (unchangedPolls >= 5 && !isPingServiceRunning()) {
+            unchangedPolls = 0
+            try {
+                p.edit().putBoolean("ping_running", false).apply()
+                            } catch (_: Exception) {}
+            stopPolling()
+            testing = false
+            startBtn.isEnabled = true
+            val stuckMsg = L("تست پینگ متوقف شد (سرویس قطع شده بود)؛ دوباره استارت بزن.", "Ping test stopped (its service was gone); start again.")
+            progressText.text = stuckMsg
+            statusText.text = stuckMsg
+            if (::progressBar.isInitialized) progressBar.visibility = View.GONE
+            refreshCopyButton()
+            return
+        }
+        progressText.text = L("در حال تست پینگ... $done از $total تست شد، $healthy سالم", "Testing ping... $done of $total tested, $healthy healthy")
+        if (::progressBar.isInitialized) {
+            // 2.52: live progress bar under the status line.
+            progressBar.visibility = View.VISIBLE
+            progressBar.max = if (total > 0) total else 1
+            progressBar.progress = done
+        }
+        // 2.52: the output view grows with every config
+        // the moment it is known healthy, so it can be
+        // copied at once without waiting for the end.
+        refreshCopyButton()
     }
 
     /** Final step shared by the poller and onResume: take the
      *  service's sorted final list, refresh the per-sub report
      *  (always, not only when the subs list is visible), apply
-     *  the desired name, and show a per-sub summary line. */
+     *  the desired name, and show the one-line summary.
+     *  2.62: the page keeps ONLY the summary line — the
+     *  per-sub block no longer lands on the page at all
+     *  (it garbled the layout); it lives in the report
+     *  dialog behind "مشاهده گزارش تست". */
     private fun applyFinishedTest() {
         val p = prefs()
         val lh = (p.getString("last_healthy", "") ?: "")
@@ -174,35 +260,86 @@ class SubscriptionActivity : Activity() {
         lastHealthy = lh
         loadSubStats()
         refreshSubsList()
-        applyDesiredName()
+        if (::progressBar.isInitialized) progressBar.visibility = View.GONE
+        refreshCopyButton()
         saveState()
         p.edit().putBoolean("ping_applied", true).apply()
         testing = false
         startBtn.isEnabled = true
         val err = p.getString("ping_error", "") ?: ""
         val total = p.getInt("ping_progress_total", 0)
-        val base = if (err.isNotBlank()) {
+        progressText.text = if (err.isNotBlank()) {
             L("تست پینگ با خطا تمام شد: $err", "Ping test ended with an error: $err")
         } else {
             L("تست پینگ انجام شد: ${lh.size} سالم از $total کانفیگ.", "Ping test done: ${lh.size} healthy of $total configs.")
         }
-        val summary = subSummaryLines()
-        val msg = if (summary.isEmpty()) base else "$base\n$summary"
-        progressText.text = msg
-        statusText.text = msg
+        updateReportBtn()
     }
 
-    /** One line per sub with stats: "ساب X: a سالم از b". */
-    private fun subSummaryLines(): String {
-        val lines = mutableListOf<String>()
+    /** The per-sub report dialog: clean rows that keep
+     *  each direction separate — name (RTL), URL in
+     *  its own LTR view, counts (RTL) — so no
+     *  mixed-direction paragraph can garble, whatever
+     *  the sub names or URLs are. */
+    private fun showReportDialog() {
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+        var any = false
         for (url in loadSubs()) {
             val rec = subReceivedMap[url] ?: 0
             if (rec <= 0) continue
+            any = true
             val ok = subHealthyMap[url] ?: 0
-            val name = subNamesMap[url] ?: url
-            lines += L("ساب $name: $ok سالم از $rec", "Sub $name: $ok healthy of $rec")
+            val name = subNamesMap[url]
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                background = HydraUi.glassBg(Color.parseColor("#CCFFFFFF"), Color.parseColor("#FFE0E0E0"), 18f, this@SubscriptionActivity)
+                setPadding(dp(12), dp(8), dp(12), dp(8))
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, dp(8)) }
+            }
+            if (name != null && name != url) {
+                card.addView(TextView(this).apply {
+                    text = name; textSize = 15f
+                    setTypeface(null, android.graphics.Typeface.BOLD)
+                })
+                card.addView(TextView(this).apply {
+                    text = url; textSize = 12f
+                    setTextColor(Color.GRAY)
+                    textDirection = View.TEXT_DIRECTION_LTR
+                })
+            } else {
+                card.addView(TextView(this).apply {
+                    text = url; textSize = 13f
+                    setTypeface(null, android.graphics.Typeface.BOLD)
+                    textDirection = View.TEXT_DIRECTION_LTR
+                })
+            }
+            card.addView(TextView(this).apply {
+                text = L("$ok سالم از $rec", "$ok healthy of $rec"); textSize = 13f
+                setTextColor(Color.parseColor("#0B6E4F"))
+            })
+            col.addView(card)
         }
-        return lines.joinToString("\n")
+        if (!any) {
+            col.addView(TextView(this).apply {
+                text = L("هنوز گزارش تستی ثبت نشده است.", "No test report recorded yet.")
+                setTextColor(Color.GRAY)
+            })
+        }
+        val scroll = ScrollView(this).apply { addView(col) }
+        AlertDialog.Builder(this)
+            .setTitle(L("گزارش تست پینگ", "Ping test report"))
+            .setView(scroll)
+            .setPositiveButton(L("بستن", "Close"), null)
+            .show()
+    }
+
+    private fun updateReportBtn() {
+        if (!::reportBtn.isInitialized) return
+        val hasReport = loadSubs().any { (subReceivedMap[it] ?: 0) > 0 }
+        reportBtn.visibility = if (hasReport) View.VISIBLE else View.GONE
     }
     private fun loadSubs(): MutableList<String> {
         val raw = prefs().getString("subs", "") ?: ""
@@ -212,26 +349,10 @@ class SubscriptionActivity : Activity() {
         prefs().edit().putString("subs", list.joinToString("\n")).apply()
     }
 
-    private fun fixedBox(heightDp: Int, hint: String): EditText = EditText(this).apply {
-        this.hint = hint
-        gravity = Gravity.TOP
-        setTextColor(Color.BLACK)
-        isVerticalScrollBarEnabled = true
-        movementMethod = android.text.method.ScrollingMovementMethod.getInstance()
-        layoutParams = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            (heightDp * resources.displayMetrics.density).toInt()
-        )
-        setOnTouchListener { v, _ ->
-            v.parent.requestDisallowInterceptTouchEvent(true)
-            false
-        }
-    }
-
     private fun divider(): View = View(this).apply {
         layoutParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, 1
-        ).apply { setMargins(0, 16, 0, 16) }
+        ).apply { setMargins(0, dp(5), 0, dp(5)) }
         setBackgroundColor(Color.parseColor("#DDDDDD"))
     }
 
@@ -240,42 +361,68 @@ class SubscriptionActivity : Activity() {
         val scroll = ScrollView(this)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 32, 32, 32)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
         }
         scroll.addView(root)
 
-        // Top bar: title + three-dot menu
-        val topRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        // Top bar: title + circular glass ⋮ menu button.
+        // 2.62: the row is MATCH_PARENT now — it used
+        // to wrap its content, which glued the ⋮ button
+        // right against the title. The button is
+        // smaller (34dp), tinted to the page's teal,
+        // and held off the title by a marginStart gap
+        // (direction-safe: the gap faces the title in
+        // both RTL and LTR).
+        val topRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT)
+        }
         topRow.addView(TextView(this).apply {
-            text = L("اشتراک‌ها", "Subscriptions"); textSize = 22f
+            text = L("اشتراک‌ها", "Subscriptions"); textSize = 20f
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         })
         topRow.addView(Button(this).apply {
-            text = "⋮"; textSize = 20f
+            text = "⋮"; textSize = 18f
+            setTextColor(Color.parseColor("#FF0F766E"))
+            isAllCaps = false
+            background = HydraUi.glassCircleBg(Color.parseColor("#FFE8F5F3"), Color.parseColor("#FFBFBFBF"))
+            elevation = 2f
+            setPadding(0, 0, 0, 0)
+            minimumWidth = 0; minimumHeight = 0
+            layoutParams = LinearLayout.LayoutParams(dp(34), dp(34)).apply { setMarginStart(dp(10)) }
             setOnClickListener { showMenu() }
         })
         root.addView(topRow)
         // Progress line, right at the top, so a test or an
         // update is visible immediately without scrolling down.
         progressText = TextView(this).apply {
-            textSize = 16f
-            setPadding(0, 8, 0, 8)
+            textSize = 14f
+            setPadding(0, dp(4), 0, dp(4))
         }
         root.addView(progressText)
+        progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(6))
+        }
+        root.addView(progressBar)
         root.addView(divider())
 
         // Saved subscription links: hidden by default, so a
-        // long list never crowds the page. A button shows
-        // them on this same page when tapped.
-        root.addView(TextView(this).apply { text = L("لینک‌های ساب ذخیره‌شده", "Saved subscription links"); textSize = 18f })
-        toggleSubsBtn = Button(this).apply {
-            text = L("نمایش لینک‌های ساب", "Show subscription links")
-            setOnClickListener {
-                subsVisible = !subsVisible
-                subsContainer.visibility = if (subsVisible) View.VISIBLE else View.GONE
-                updateToggleText()
-                if (subsVisible) refreshSubsList()
-            }
+        // long list never crowds the page.
+        root.addView(TextView(this).apply {
+            text = L("لینک‌های ساب ذخیره‌شده", "Saved subscription links"); textSize = 16f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setTextColor(Color.parseColor("#1A237E"))
+        })
+        toggleSubsBtn = glassBtn(L("نمایش لینک‌های ساب", "Show subscription links")) {
+            subsVisible = !subsVisible
+            subsContainer.visibility = if (subsVisible) View.VISIBLE else View.GONE
+            addSubRow.visibility = if (subsVisible) View.VISIBLE else View.GONE
+            updateToggleText()
+            if (subsVisible) refreshSubsList()
         }
         root.addView(toggleSubsBtn)
         subsContainer = LinearLayout(this).apply {
@@ -287,110 +434,246 @@ class SubscriptionActivity : Activity() {
         loadSubMeta()
         loadSubSource()
         updateToggleText()
-        newSubF = EditText(this).apply { hint = L("لینک ساب جدید (https://...)", "New subscription link (https://...)") }
-        root.addView(newSubF)
-        root.addView(Button(this).apply {
-            text = L("افزودن و ذخیره لینک ساب", "Add and save subscription link")
-            setOnClickListener {
-                val url = newSubF.text.toString().trim()
-                if (url.isBlank() || !url.startsWith("http")) {
-                    statusText.text = L("لینک ساب معتبر نیست.", "Subscription link is not valid.")
-                    return@setOnClickListener
-                }
-                val subs = loadSubs()
-                if (!subs.contains(url)) {
-                    subs += url; saveSubs(subs)
-                }
-                newSubF.setText("")
-                refreshSubsList()
-                statusText.text = L("لینک ساب ذخیره شد.", "Subscription link saved.")
-            }
+        // 2.53: adding a sub lives INSIDE the saved-subs
+        // section now — it appears below the list only
+        // when the section is expanded, not on the
+        // main page.
+        addSubRow = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+        addSubRow.addView(TextView(this).apply {
+            text = L("افزودن ساب جدید", "Add a new subscription"); textSize = 14f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setTextColor(Color.parseColor("#1A237E"))
+            setPadding(0, dp(8), 0, dp(2))
         })
-        refreshSubsList()
+        newSubF = EditText(this).apply {
+            hint = L("لینک ساب جدید (https://...)", "New subscription link (https://...)")
+            background = HydraUi.glassBg(Color.parseColor("#CCFFFFFF"), Color.parseColor("#FFBFBFBF"), 18f, this@SubscriptionActivity)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+        addSubRow.addView(newSubF)
+        addSubRow.addView(glassBtn(L("افزودن و ذخیره لینک ساب", "Add and save subscription link")) {
+            val url = newSubF.text.toString().trim()
+            if (url.isBlank() || !url.startsWith("http")) {
+                statusText.text = L("لینک ساب معتبر نیست.", "Subscription link is not valid.")
+                return@glassBtn
+            }
+            val subs = loadSubs()
+            if (!subs.contains(url)) {
+                subs += url; saveSubs(subs)
+            }
+            newSubF.setText("")
+            refreshSubsList()
+            statusText.text = L("لینک ساب ذخیره شد.", "Subscription link saved.")
+        })
+        root.addView(addSubRow)
+        // 2.22: saved-sub rows build on first expand
+        // (the toggle handler already refreshes then),
+        // not eagerly here while the list is hidden.
         root.addView(divider())
 
-        // Box 1: fetched configs (fixed height, internal scroll)
-        root.addView(TextView(this).apply {
-            text = L("کانفیگ‌های دریافت‌شده", "Received configs"); textSize = 18f
-            setPadding(0, 8, 0, 8)
-        })
-        box1 = fixedBox(240, L("با سه‌نقطه بالا، «به‌روزرسانی همه اشتراک‌ها» را بزن", "Tap “Update all subscriptions” in the ⋮ menu at the top"))
-        root.addView(box1)
-        val startRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        startBtn = Button(this).apply {
-            text = L("استارت تست پینگ", "Start ping test")
-            setPadding(0, 20, 0, 20)
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            setOnClickListener { runPingTest() }
-        }
-        startRow.addView(startBtn)
-        stopBtn = Button(this).apply {
-            text = L("توقف تست پینگ", "Stop ping test")
-            setPadding(0, 20, 0, 20)
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            setOnClickListener {
-                try {
-                    stopService(Intent(this@SubscriptionActivity, PingTestService::class.java))
-                } catch (_: Exception) {}
-                progressText.text = L("در حال توقف تست پینگ...", "Stopping ping test...")
-            }
-        }
-        startRow.addView(stopBtn)
-        root.addView(startRow)
+        // 2.52: the update action, now selected-subs only.
+        root.addView(glassBtn(L("بروزرسانی اشتراک‌های انتخاب‌شده", "Update selected subscriptions"), primary = true) { updateSelectedSubs() })
         root.addView(divider())
 
-        // Desired name for the output: if filled, healthy
-        // configs get exactly this name; if empty, they keep
-        // their original names.
+        // Ping row: start + stop, glass, modern padding.
+        val pingRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(8), 0, 0)
+        }
+        startBtn = glassBtn(L("استارت تست پینگ", "Start ping test"), primary = true) { runPingTest() }.apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                setMargins(0, 0, dp(6), 0)
+            }
+        }
+        pingRow.addView(startBtn)
+        stopBtn = glassBtn(L("توقف تست پینگ", "Stop ping test")) {
+            try {
+                stopService(Intent(this@SubscriptionActivity, PingTestService::class.java))
+            } catch (_: Exception) {}
+            // flag itself instead of depending on the
+            // service's onDestroy (which a system kill
+            // can skip, leaving the test stuck forever).
+            try {
+                prefs().edit().putBoolean("ping_running", false).apply()
+            } catch (_: Exception) {}
+            testing = false
+            startBtn.isEnabled = true
+            try {
+                            } catch (_: Exception) {}
+            progressText.text = L("در حال توقف تست پینگ...", "Stopping ping test...")
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        pingRow.addView(stopBtn)
+        root.addView(pingRow)
+
+        // 2.62: the per-sub test report lives HERE, not
+        // on the page: the old giant mixed-direction
+        // block (Persian + URLs + digits in one
+        // TextView) is what garbled the page. The page
+        // keeps only the one-line summary; the full
+        // report opens in a dialog whose rows keep
+        // each direction separate, so it cannot garble.
+        reportBtn = glassBtn(L("مشاهده گزارش تست", "View test report")) { showReportDialog() }.apply {
+            visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(10) }
+        }
+        root.addView(reportBtn)
+
+        root.addView(divider())
+
+        // Desired name for the output: one field, applied
+        // AUTOMATICALLY (2.52). No apply button any more:
+        // typing a name re-renders the output at once, and
+        // clearing it brings back the original names.
         root.addView(TextView(this).apply {
-            text = L("نام دلخواه برای خروجی", "Desired name for output"); textSize = 18f
-            setPadding(0, 8, 0, 8)
+            text = L("نام دلخواه برای خروجی", "Desired name for output"); textSize = 16f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setTextColor(Color.parseColor("#1A237E"))
+            setPadding(0, dp(4), 0, dp(2))
         })
         root.addView(TextView(this).apply {
-            text = L("اگر خالی بماند، کانفیگ‌ها با اسم‌های اصلی‌شان می‌آیند. اگر نامی بنویسی، همه سالم‌ها دقیقاً همان نام را می‌گیرند.", "If left empty, configs come with their original names. If you write a name, all healthy ones get exactly that name.")
-            setTextColor(Color.GRAY); textSize = 14f
+            text = L("خالی = اسم اصلی؛ یک نام = همان نام برای همه سالم‌ها، به‌صورت خودکار.", "Empty = original names; one name = that name for all healthy ones, automatically.")
+            setTextColor(Color.GRAY); textSize = 13f
         })
-        nameF = EditText(this).apply { hint = L("نام دلخواه (اختیاری)", "Desired name (optional)") }
+        nameF = EditText(this).apply {
+            hint = L("نام دلخواه (اختیاری)", "Desired name (optional)")
+            background = HydraUi.glassBg(Color.parseColor("#CCFFFFFF"), Color.parseColor("#FFBFBFBF"), 18f, this@SubscriptionActivity)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            addTextChangedListener(object : android.text.TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                override fun afterTextChanged(s: android.text.Editable?) {
+                    refreshCopyButton()
+                    saveState()
+                }
+            })
+        }
         root.addView(nameF)
-        root.addView(Button(this).apply {
-            text = L("اعمال نام روی خروجی", "Apply name to output")
-            setOnClickListener { applyDesiredName() }
-        })
-        // Box 2: healthy only (fixed height, internal scroll)
-        root.addView(TextView(this).apply {
-            text = L("فقط کانفیگ‌های سالم", "Only healthy configs"); textSize = 18f
-            setPadding(0, 8, 0, 8)
-        })
-        box2 = fixedBox(240, L("بعد از تست پینگ، سالم‌ها اینجا می‌آیند", "After the ping test, healthy ones will appear here"))
-        root.addView(box2)
-        root.addView(Button(this).apply {
-            text = L("کپی کانفیگ‌های سالم", "Copy healthy configs")
-            setPadding(0, 20, 0, 20)
-            setOnClickListener {
-                val text = box2.text.toString().trim()
-                if (text.isBlank()) {
-                    statusText.text = L("چیزی برای کپی نیست.", "Nothing to copy.")
-                    return@setOnClickListener
-                }
-                try {
-                    val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    cm.setPrimaryClip(android.content.ClipData.newPlainText("healthy", text))
-                    statusText.text = L("کانفیگ‌های سالم کپی شد.", "Healthy configs copied.")
-                    Toast.makeText(this@SubscriptionActivity, L("کپی شد", "Copied"), Toast.LENGTH_SHORT).show()
-                } catch (e: Exception) {
-                    statusText.text = L("کپی ناموفق: ${e.message}", "Copy failed: ${e.message}")
-                }
+
+        // 2.53: the output box is GONE (user order) —
+        // the copy button below, with its live count,
+        // is the whole output now.
+        // Copy button, carrying the live healthy COUNT
+        // (2.52): tapping it copies exactly what is
+        // healthy at that moment, even mid-test.
+        copyBtn = glassBtn(L("کپی کانفیگ‌های سالم (0)", "Copy healthy configs (0)"), primary = true) {
+            val out = outputConfigs()
+            if (out.isEmpty()) {
+                statusText.text = L("چیزی برای کپی نیست.", "Nothing to copy.")
+                return@glassBtn
             }
-        })
-        statusText = TextView(this).apply { setPadding(0, 12, 0, 12) }
+            try {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("healthy", out.joinToString("\n")))
+                val n = out.size
+                statusText.text = if (prefs().getBoolean("ping_running", false))
+                    L("$n کانفیگ سالمِ فعلاً پیدا شده کپی شد (تست هنوز تمام نشده).", "$n healthy configs found so far copied (test still running).")
+                else
+                    L("$n کانفیگ سالم کپی شد.", "$n healthy configs copied.")
+                Toast.makeText(this@SubscriptionActivity, L("کپی شد", "Copied"), Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                statusText.text = L("کپی ناموفق: ${e.message}", "Copy failed: ${e.message}")
+            }
+        }
+        // 2.62: the copy button sits a full section gap
+        // below the desired-name box, like the other
+        // buttons sit below their upper box — it used
+        // to touch the box above it.
+        copyBtn.apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(12) }
+        }
+        root.addView(copyBtn)
+        statusText = TextView(this).apply {
+            setPadding(0, dp(8), 0, dp(8))
+        }
         root.addView(statusText)
-        root.addView(Button(this).apply {
-            text = L("بازگشت", "Back")
-            setOnClickListener { finish() }
-        })
         setContentView(scroll)
         scroll.fitsSystemWindows = true
-        loadState()
+        loadState(fillBoxes = false)
+        // 2.22: fill the boxes right after the first
+        // frame instead of before it — the page opens
+        // instantly with many configs, then fills.
+        scroll.post {
+            try { refreshCopyButton() } catch (_: Exception) {}
+        }
+    }
+
+
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    /** 2.53: real gradient buttons, drawn (no
+     *  photos): primary = teal gradient + white
+     *  bold text; secondary = white-to-mist
+     *  gradient + dark text. Flat fills, so no
+     *  white gloss band on any of them.
+     *  2.54: tighter — smaller text, padding and
+     *  corners, so the page reads compact. */
+    private fun glassBtn(text: String, primary: Boolean = false, onClick: () -> Unit): Button = Button(this).apply {
+        this.text = text
+        background = android.graphics.drawable.GradientDrawable().apply {
+            orientation = android.graphics.drawable.GradientDrawable.Orientation.TOP_BOTTOM
+            if (primary) {
+                colors = intArrayOf(Color.parseColor("#FF2BBBAD"), Color.parseColor("#FF0F766E"))
+                setStroke(dp(1), Color.parseColor("#FF0B5E52"))
+            } else {
+                colors = intArrayOf(Color.parseColor("#FFFFFFFF"), Color.parseColor("#FFE8F5F3"))
+                setStroke(dp(1), Color.parseColor("#FFBFBFBF"))
+            }
+            cornerRadius = 22f * resources.displayMetrics.density
+        }
+        textSize = if (primary) 15f else 14f
+        setTextColor(if (primary) Color.WHITE else Color.parseColor("#FF1A1A1A"))
+        if (primary) setTypeface(null, android.graphics.Typeface.BOLD)
+        elevation = if (primary) 4f else 2f
+        setPadding(dp(14), dp(10), dp(14), dp(10))
+        setOnClickListener { onClick() }
+    }
+
+
+    /** The exact configs the copy button will copy: the final
+     *  sorted list (lowest ping first) once a test finished,
+     *  live arrivals while one is running — all of them, with
+     *  the desired name applied (2.6 behavior: no count limit). */
+    private fun outputConfigs(): List<String> {
+        val name = try { nameF.text.toString().trim() } catch (_: Exception) { "" }
+        val base = currentHealthyBase()
+        return if (name.isBlank()) base else base.map { renameConfig(it, name) }
+    }
+
+    /** The healthy list the output view and the copy
+     *  button see right now (2.52). While a test runs,
+     *  the live arrivals; after a clean finish, the
+     *  final sorted list; after a mid-test stop, the
+     *  partial live list when one exists. */
+    private fun currentHealthyBase(): List<String> {
+        val p = prefs()
+        val live = (p.getString("ping_healthy_live", "") ?: "")
+            .lines().map { it.trim() }.filter { it.isNotBlank() }
+        return when {
+            p.getBoolean("ping_running", false) -> live
+            p.getBoolean("ping_done", false) -> lastHealthy
+            live.isNotEmpty() -> live
+            else -> lastHealthy
+        }
+    }
+
+    /** 2.53: the output BOX is gone — this only
+     *  refreshes the copy button's live healthy
+     *  count. The count needs no renaming, so it
+     *  reads the base list directly. */
+    private fun refreshCopyButton() {
+        if (!::copyBtn.isInitialized) return
+        val n = currentHealthyBase().size
+        copyBtn.text = L("کپی کانفیگ‌های سالم ($n)", "Copy healthy configs ($n)")
     }
 
     private fun updateToggleText() {
@@ -474,6 +757,7 @@ class SubscriptionActivity : Activity() {
     private fun refreshSubsList() {
         subsContainer.removeAllViews()
         updateToggleText()
+        updateReportBtn()
         val subs = loadSubs()
         if (subs.isEmpty()) {
             subsContainer.addView(TextView(this).apply {
@@ -483,7 +767,13 @@ class SubscriptionActivity : Activity() {
             return
         }
         for (url in subs) {
-            val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            val col = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                background = HydraUi.glassBg(Color.parseColor("#CCFFFFFF"), Color.parseColor("#FFE0E0E0"), 18f, this@SubscriptionActivity)
+                elevation = 1f
+                setPadding(dp(12), dp(8), dp(12), dp(8))
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, dp(8)) }
+            }
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -499,12 +789,18 @@ class SubscriptionActivity : Activity() {
             })
             val label = subNamesMap[url]
             row.addView(TextView(this).apply {
-                text = label ?: url; textSize = 14f
+                text = label ?: url; textSize = 15f
+                setTypeface(null, android.graphics.Typeface.BOLD)
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             })
             // Edit button: give this sub a custom name.
             row.addView(Button(this).apply {
                 text = "✎"
+                background = HydraUi.glassCircleBg(Color.parseColor("#CCFFFFFF"), Color.parseColor("#FFBFBFBF"))
+                elevation = 4f
+                setPadding(0, 0, 0, 0)
+                minimumWidth = 0; minimumHeight = 0
+                layoutParams = LinearLayout.LayoutParams(dp(32), dp(32)).apply { setMargins(dp(4), 0, dp(4), 0) }
                 setOnClickListener {
                     val input = EditText(this@SubscriptionActivity).apply {
                         setText(subNamesMap[url] ?: "")
@@ -524,7 +820,12 @@ class SubscriptionActivity : Activity() {
                 }
             })
             row.addView(Button(this).apply {
-                text = L("حذف", "Delete")
+                text = "✕"
+                background = HydraUi.glassCircleBg(Color.parseColor("#CCFFFFFF"), Color.parseColor("#FFBFBFBF"))
+                elevation = 4f
+                setPadding(0, 0, 0, 0)
+                minimumWidth = 0; minimumHeight = 0
+                layoutParams = LinearLayout.LayoutParams(dp(32), dp(32)).apply { setMargins(dp(4), 0, dp(4), 0) }
                 setOnClickListener {
                     val cur = loadSubs(); cur.remove(url); saveSubs(cur)
                     subReceivedMap.remove(url); subHealthyMap.remove(url); saveSubStats()
@@ -539,9 +840,10 @@ class SubscriptionActivity : Activity() {
                     setTextColor(Color.GRAY)
                 })
             }
-            // Report in front of each sub link: how many
-            // configs were received from it, and how many of
-            // those were healthy in the last ping test.
+            // Report in front of each sub link: received +
+            // healthy counts (2.6 behavior — after a fresh
+            // update the healthy count is the previous test's
+            // until the next test replaces it).
             if (subReceivedMap.containsKey(url)) {
                 val rec = subReceivedMap[url] ?: 0
                 val ok = subHealthyMap[url] ?: 0
@@ -556,22 +858,48 @@ class SubscriptionActivity : Activity() {
     }
 
     private fun showMenu() {
-        val items = arrayOf(L("به‌روزرسانی همه اشتراک‌ها", "Update all subscriptions"), L("تست پینگ همه کانفیگ‌ها", "Ping test all configs"), L("خالی کردن همه کادرها", "Clear all boxes"))
+        val items = arrayOf(L("بروزرسانی اشتراک‌های انتخاب‌شده", "Update selected subscriptions"), L("تست پینگ همه کانفیگ‌ها", "Ping test all configs"), L("خالی کردن همه", "Clear everything"))
         AlertDialog.Builder(this)
             .setTitle("⋮")
             .setItems(items) { _, which ->
                 when (which) {
-                    0 -> updateAllSubs()
+                    0 -> updateSelectedSubs()
                     1 -> runPingTest()
                     2 -> AlertDialog.Builder(this)
-                        .setTitle(L("خالی کردن همه کادرها", "Clear all boxes"))
-                        .setMessage(L("همه کادرها (دریافت‌شده، نام دلخواه و سالم‌ها) خالی شود؟", "Clear all boxes (received, desired name and healthy ones)?"))
+                        .setTitle(L("خالی کردن همه", "Clear everything"))
+                        .setMessage(L("کانفیگ‌های دریافت‌شده، نام دلخواه و خروجی سالم‌ها خالی شود؟", "Clear the received configs, the desired name and the healthy output?"))
                         .setPositiveButton(L("بله، خالی کن", "Yes, clear")) { _, _ ->
-                            box1.setText(""); box2.setText(""); nameF.setText("")
+                            fetchedConfigs = mutableListOf()
+                            nameF.setText("")
                             lastHealthy = emptyList()
+                            // clears the ping state too, and
+                            // stops a running test, so its
+                            // finish cannot resurrect the
+                            // cleared results afterwards.
+                            try {
+                                stopService(Intent(this@SubscriptionActivity, PingTestService::class.java))
+                            } catch (_: Exception) {}
+                            stopPolling()
+                            testing = false
+                            startBtn.isEnabled = true
+                            unchangedPolls = 0
+                            prefs().edit()
+                                .putString("ping_healthy_live", "")
+                                .putString("last_healthy", "")
+                                .putString("box2", "")
+                                .putBoolean("ping_running", false)
+                                .putBoolean("ping_done", false)
+                                .putBoolean("ping_applied", false)
+                                .putInt("ping_progress_done", 0)
+                                .putInt("ping_progress_total", 0)
+                                .putInt("ping_progress_healthy", 0)
+                                .apply()
+                            try {
+                                                            } catch (_: Exception) {}
                             saveState()
-                            progressText.text = L("همه کادرها خالی شد.", "All boxes cleared.")
-                            statusText.text = L("همه کادرها خالی شد.", "All boxes cleared.")
+                            refreshCopyButton()
+                            progressText.text = L("همه خالی شد.", "Everything cleared.")
+                            statusText.text = L("همه خالی شد.", "Everything cleared.")
                         }
                         .setNegativeButton(L("لغو", "Cancel"), null)
                         .show()
@@ -641,11 +969,20 @@ class SubscriptionActivity : Activity() {
         }
     }
 
-    private fun updateAllSubs() {
-        val subs = loadSubs()
+    /** 2.52: update ONLY the checked subscriptions.
+     *  Unchecked subs are left completely alone: their
+     *  configs are not fetched, and their previous
+     *  received/healthy report stays as it was. */
+    private fun updateSelectedSubs() {
+        val allSubs = loadSubs()
+        val subs = allSubs.filter { isSubSelected(it) }
         if (subs.isEmpty()) {
-            progressText.text = L("اول یک لینک ساب ذخیره کن.", "Save a subscription link first.")
-            statusText.text = L("اول یک لینک ساب ذخیره کن.", "Save a subscription link first.")
+            val msg = if (allSubs.isEmpty())
+                L("اول یک لینک ساب ذخیره کن.", "Save a subscription link first.")
+            else
+                L("هیچ سابی انتخاب نشده؛ ساب‌های مورد نظر را تیک بزن.", "No subscription selected; tick the subscriptions you want.")
+            progressText.text = msg
+            statusText.text = msg
             return
         }
         progressText.text = L("در حال به‌روزرسانی اشتراک‌ها...", "Updating subscriptions...")
@@ -690,20 +1027,26 @@ class SubscriptionActivity : Activity() {
                 perSub[url] = countForSub
             }
             runOnUiThread {
-                box1.setText(all.joinToString("\n"))
+                fetchedConfigs = all.toMutableList()
                 saveState()
-                subReceivedMap.clear(); subReceivedMap.putAll(perSub)
-                subHealthyMap.clear()
+                // Selected subs only: received counts are
+                // refreshed for them; unchecked subs keep
+                // their previous report untouched.
+                for ((u, c) in perSub) subReceivedMap[u] = c
                 subSourceMap.clear(); subSourceMap.putAll(source)
                 saveSubStats()
                 saveSubSource()
                 if (subsVisible) refreshSubsList()
+                refreshCopyButton()
                 val dup = received - all.size
                 val msg = L("به‌روزرسانی انجام شد: $received کانفیگ دریافت شد", "Update done: $received configs received") +
                     if (dup > 0) L("، $dup تکراری حذف شد، ${all.size} کانفیگ باقی ماند.", ", $dup duplicates removed, ${all.size} configs left.")
                     else L("، ${all.size} کانفیگ اضافه شد.", ", ${all.size} configs added.")
                 progressText.text = msg
                 statusText.text = msg
+                AppLog.append(this, "subs",
+                    "به‌روزرسانی اشتراک‌های انتخاب‌شده انجام شد: $received کانفیگ دریافت شد" + if (dup > 0) "، $dup تکراری حذف شد، ${all.size} کانفیگ باقی ماند." else "، ${all.size} کانفیگ اضافه شد.",
+                    "Selected subscription update done: $received configs received" + if (dup > 0) ", $dup duplicates removed, ${all.size} configs left." else ", ${all.size} configs added.")
             }
         }.start()
     }
@@ -727,24 +1070,6 @@ class SubscriptionActivity : Activity() {
         } catch (_: Exception) { cfg }
     }
 
-    /** Apply the desired-name box to the healthy output:
-     *  empty -> original names, filled -> exactly that name. */
-    private fun applyDesiredName() {
-        if (lastHealthy.isEmpty()) {
-            statusText.text = L("هنوز تست پینگی انجام نشده است.", "No ping test has been run yet.")
-            return
-        }
-        val name = nameF.text.toString().trim()
-        val out = if (name.isBlank()) lastHealthy
-                  else lastHealthy.map { renameConfig(it, name) }
-        box2.setText(out.joinToString("\n"))
-        saveState()
-        statusText.text = if (name.isBlank())
-            L("خروجی با اسم‌های اصلی برگشت.", "Output returned with original names.")
-        else
-            L("خروجی با نام «$name» اعمال شد.", "Output applied with name “$name”.")
-    }
-
     private fun initCore(): Boolean {
         if (coreInitDone) return true
         val ok = CoreInit.init(applicationContext)
@@ -762,18 +1087,20 @@ class SubscriptionActivity : Activity() {
      *  leaves the app. This method only prepares the list,
      *  starts the service, and starts the live poller; the
      *  service does the measuring and writes live progress to
-     *  prefs, which the poller shows in box 2 as each healthy
-     *  config appears. */
+     *  prefs, which the poller shows in the output view
+     *  as each healthy config appears. */
     private fun runPingTest() {
         if (testing || prefs().getBoolean("ping_running", false)) {
             progressText.text = L("تست پینگ در حال انجام است؛ صبر کن.", "Ping test is running; please wait.")
             startPolling()
             return
         }
-        val rawConfigs = box1.text.toString().lines().map { it.trim() }.filter { it.isNotBlank() }
+        // 2.52: no received box any more — the test runs
+        // on the fetched list kept in memory + prefs.
+        val rawConfigs = fetchedConfigs.map { it.trim() }.filter { it.isNotBlank() }
         if (rawConfigs.isEmpty()) {
-            progressText.text = L("کادر اول خالی است؛ اول اشتراک‌ها را به‌روز کن.", "Box 1 is empty; update the subscriptions first.")
-            statusText.text = L("کادر اول خالی است؛ اول اشتراک‌ها را به‌روز کن.", "Box 1 is empty; update the subscriptions first.")
+            progressText.text = L("هنوز کانفیگی دریافت نشده؛ اول اشتراک‌ها را به‌روز کن.", "No configs received yet; update the subscriptions first.")
+            statusText.text = L("هنوز کانفیگی دریافت نشده؛ اول اشتراک‌ها را به‌روز کن.", "No configs received yet; update the subscriptions first.")
             return
         }
         // Remove duplicates BEFORE pinging, with the normalized
@@ -786,15 +1113,16 @@ class SubscriptionActivity : Activity() {
         }
         val dupRemoved = rawConfigs.size - configs.size
         if (dupRemoved > 0) {
-            box1.setText(configs.joinToString("\n"))
+            fetchedConfigs = configs.toMutableList()
             saveState()
             progressText.text = L("$dupRemoved کانفیگ تکراری حذف شد؛ ${configs.size} کانفیگ برای تست باقی ماند.", "$dupRemoved duplicate configs removed; ${configs.size} configs left to test.")
         }
         // Ping only the checked subs. A config whose source
         // sub is unknown (pasted by hand) is still tested;
         // a config from an unchecked sub is skipped, and
-        // box 1 is NOT rewritten to the filtered list, so
-        // unchecked configs stay there for later.
+        // the fetched list is NOT rewritten to the
+        // filtered list, so unchecked configs stay there
+        // for later.
         val toTest = configs.filter { cfg ->
             val src = subSourceMap[dedupKey(cfg)]
             src == null || isSubSelected(src)
@@ -828,12 +1156,15 @@ class SubscriptionActivity : Activity() {
             .putBoolean("ping_applied", false)
             .putBoolean("ping_running", true)
             .putString("ping_error", "")
+            .putString("ping_live_sub", "{}")
             .apply()
+        if (subsVisible) refreshSubsList()
         saveState()
         testing = true
         startBtn.isEnabled = false
-        // Box 2 is NOT cleared here: the old output stays
-        // until live healthy configs start replacing it.
+        // The output view is NOT cleared by hand here:
+        // once the poller sees the test running it shows
+        // the live list, which starts empty and grows.
         progressText.text = L("در حال تست پینگ... ۰ از ${toTest.size} تست شد، ۰ سالم", "Testing ping... 0 of ${toTest.size} tested, 0 healthy")
         try {
             val intent = Intent(this, PingTestService::class.java)

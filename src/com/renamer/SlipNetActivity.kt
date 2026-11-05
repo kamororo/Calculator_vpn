@@ -365,9 +365,8 @@ class SlipNetActivity : Activity() {
 
     private fun toggleConnect() {
         if (VpnClientService.isRunning) {
-            val stop = Intent(this, VpnClientService::class.java).apply { action = "STOP" }
+            val stop = Intent(this, VpnClientService::class.java).apply { action = "STOP" ; putExtra("stop_gen", VpnClientService.sessionGen) }
             try { startService(stop) } catch (_: Exception) {}
-            try { stopService(Intent(this, VpnClientService::class.java)) } catch (_: Exception) {}
             VpnClientService.isRunning = false; VpnClientService.currentName = null
             SlipNetSsh.stop()
             SlipNetDns.stop()

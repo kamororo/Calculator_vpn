@@ -16,11 +16,13 @@ OVPN=${OVPN_SRC:-$ROOT/.tmp/ovpn_lib/vpnLib/src/main}
 OVPN_TMP=/tmp/ovpn_build
 XRAY_AAR=${XRAY_AAR:-$ROOT/.tmp/xray/aar}
 WG_AAR=${WG_AAR:-$ROOT/.tmp/wg/aar}
+AWG_AAR=${AWG_AAR:-$ROOT/.tmp/awg/aar}
 rm -rf $OUT && mkdir -p $OUT/apk $OUT/dex $OVPN_TMP/ovpn_res $OVPN_TMP/aidl_gen $OVPN_TMP/classes
 export PATH=$JDK/bin:$PATH
 XRAY_JAR=$XRAY_AAR/classes.jar
 ZXING_JAR=$SRC/third_party/zxing-core.jar
 WG_JAR=$SRC/third_party/wg-tunnel-stripped.jar
+AWG_JAR=$SRC/third_party/awg-tunnel.jar
 ANDROIDX_STUB_JAR=$SRC/third_party/androidx-collection-stub.jar
 JSCH_JAR=$SRC/third_party/jsch-0.1.55.jar
 ANN_JAR=$OVPN_TMP/deps/annotation-jvm-1.8.0.jar
@@ -83,15 +85,16 @@ $JDK/bin/javac -nowarn -encoding UTF-8 -source 8 -target 8 -cp $ANDROID_JAR -d $
 cd $OUT/slipnet_classes && $JDK/bin/jar cf $OUT/slipnet.jar . && cd $ROOT
 
 echo "== kotlinc =="
-$ROOT/tools/kotlin/kotlinc/bin/kotlinc -cp $ANDROID_JAR:$XRAY_JAR:$ZXING_JAR:$WG_JAR:$ANDROIDX_STUB_JAR:$OUT/ovpn.jar:$OUT/ovpn3.jar:$OUT/slipnet.jar:$JSCH_JAR:$ANN_JAR:$CORE_JAR:$LOCALBM_JAR -d $OUT/classes.jar $SRC/src/com/renamer/*.kt $SRC/src/app/slipnet/tunnel/*.kt $OUT/gen/com/renamer/R.java 2>&1 | tee $OUT/kotlinc.log
+$ROOT/tools/kotlin/kotlinc/bin/kotlinc -cp $ANDROID_JAR:$XRAY_JAR:$ZXING_JAR:$WG_JAR:$AWG_JAR:$ANDROIDX_STUB_JAR:$OUT/ovpn.jar:$OUT/ovpn3.jar:$OUT/slipnet.jar:$JSCH_JAR:$ANN_JAR:$CORE_JAR:$LOCALBM_JAR -d $OUT/classes.jar $SRC/src/com/renamer/*.kt $SRC/src/app/slipnet/tunnel/*.kt $OUT/gen/com/renamer/R.java 2>&1 | tee $OUT/kotlinc.log
 echo "== d8 =="
-java -cp $BT/lib/d8.jar com.android.tools.r8.D8 --lib $ANDROID_JAR --output $OUT/dex $OUT/classes.jar $ROOT/tools/kotlin/kotlinc/lib/kotlin-stdlib.jar $XRAY_JAR $ZXING_JAR $WG_JAR $ANDROIDX_STUB_JAR $OUT/ovpn.jar $OUT/ovpn3.jar $OUT/slipnet.jar $JSCH_JAR $ANN_JAR $CORE_JAR $LOCALBM_JAR 2>&1 | tee $OUT/d8.log
+java -cp $BT/lib/d8.jar com.android.tools.r8.D8 --lib $ANDROID_JAR --output $OUT/dex $OUT/classes.jar $ROOT/tools/kotlin/kotlinc/lib/kotlin-stdlib.jar $XRAY_JAR $ZXING_JAR $WG_JAR $AWG_JAR $ANDROIDX_STUB_JAR $OUT/ovpn.jar $OUT/ovpn3.jar $OUT/slipnet.jar $JSCH_JAR $ANN_JAR $CORE_JAR $LOCALBM_JAR 2>&1 | tee $OUT/d8.log
 echo "== pack =="
 cp $OUT/dex/classes.dex $OUT/apk/classes.dex
 mkdir -p $OUT/apk/assets $OUT/apk/lib/arm64-v8a
-cp $SRC/assets/*.png $OUT/apk/assets/ 2>/dev/null || true
+cp $SRC/assets/*.png $SRC/assets/*.jpg $SRC/assets/*.js $OUT/apk/assets/ 2>/dev/null || true
 cp $XRAY_AAR/jni/arm64-v8a/libgojni.so $OUT/apk/lib/arm64-v8a/ 2>/dev/null || true
 cp $WG_AAR/jni/arm64-v8a/libwg-go.so $OUT/apk/lib/arm64-v8a/ 2>/dev/null || true
+cp $AWG_AAR/jni/arm64-v8a/libawg-go.so $OUT/apk/lib/arm64-v8a/ 2>/dev/null || true
 cp $OVPN/jniLibs/arm64-v8a/*.so $OUT/apk/lib/arm64-v8a/ 2>/dev/null || true
 cp $OVPN/assets/pie_openvpn.arm64-v8a $OUT/apk/assets/ 2>/dev/null || true
 cp $XRAY_AAR/assets/geoip.dat $XRAY_AAR/assets/geosite.dat $OUT/apk/assets/ 2>/dev/null || true

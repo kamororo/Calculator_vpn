@@ -50,7 +50,7 @@ class VpnSettingsActivity : Activity() {
         box.addView(TextView(this).apply { text = title; textSize = 16f })
         if (desc.isNotBlank()) box.addView(TextView(this).apply {
             text = desc; textSize = 13f
-            setTextColor(Color.parseColor("#777777"))
+            setTextColor(Color.GRAY)
             setPadding(0, dp(2), 0, dp(4))
         })
         box.addView(control)
@@ -58,7 +58,7 @@ class VpnSettingsActivity : Activity() {
         root.addView(View(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(1))
-            setBackgroundColor(Color.parseColor("#EEEEEE"))
+            setBackgroundColor(Color.parseColor("#DDDDDD"))
         })
     }
 
@@ -103,6 +103,7 @@ class VpnSettingsActivity : Activity() {
         }
         val btn = Button(this).apply {
             text = L("انتخاب", "Choose")
+            
             setOnClickListener {
                 AlertDialog.Builder(this@VpnSettingsActivity)
                     .setTitle(title)
@@ -133,7 +134,7 @@ class VpnSettingsActivity : Activity() {
     private fun noteRow(root: LinearLayout, text: String) {
         root.addView(TextView(this).apply {
             this.text = text; textSize = 13f
-            setTextColor(Color.parseColor("#888888"))
+            setTextColor(Color.GRAY)
             setPadding(0, dp(4), 0, dp(12))
         })
     }
@@ -196,6 +197,7 @@ class VpnSettingsActivity : Activity() {
               "App language; the page is recreated after choosing."),
             Button(this).apply {
                 text = if (AppLanguage.isEnglish(this@VpnSettingsActivity)) "English" else "فارسی"
+                
                 setOnClickListener {
                     AlertDialog.Builder(this@VpnSettingsActivity)
                         .setTitle(L("زبان برنامه", "App language"))
@@ -399,6 +401,7 @@ class VpnSettingsActivity : Activity() {
 
         root.addView(Button(this).apply {
             text = L("بازگشت", "Back")
+            
             setOnClickListener { finish() }
         })
         setContentView(scroll)

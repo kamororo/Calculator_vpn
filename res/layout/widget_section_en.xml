@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2.35: EN widget. Same baked-in order as the FA file: connect
+     button FIRST (always left), info column after it. Inside the
+     info column the icon sits BEFORE the name (icon at the left,
+     name to its right) and all three texts START on one line
+     (left edge = 30dp gutter: 24dp icon + 6dp gap). -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_section_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+    <ImageView
+        android:id="@+id/widget_section_bg"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="fitXY" />
+<LinearLayout
+    android:id="@+id/widget_section_content"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:paddingLeft="12dp"
+    android:paddingRight="12dp"
+    android:paddingTop="6dp"
+    android:paddingBottom="6dp">
+    <ImageView
+        android:id="@+id/widget_section_btn"
+        android:layout_width="68dp"
+        android:layout_height="68dp"
+        android:scaleType="fitCenter" />
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:orientation="vertical"
+        android:gravity="center_vertical">
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+            <FrameLayout
+                android:layout_width="24dp"
+                android:layout_height="24dp">
+                <ImageView
+                    android:id="@+id/widget_section_icon_bg"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:src="@drawable/widget_circle_white" />
+                <ImageView
+                    android:id="@+id/widget_section_icon"
+                    android:layout_width="17dp"
+                    android:layout_height="17dp"
+                    android:layout_gravity="center"
+                    android:scaleType="fitCenter" />
+            </FrameLayout>
+            <TextView
+                android:id="@+id/widget_section_name"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:paddingStart="6dp"
+                android:gravity="left"
+                android:textSize="15sp"
+                android:textStyle="bold"
+                android:ellipsize="end"
+                android:maxLines="1" />
+        </LinearLayout>
+        <LinearLayout
+            android:id="@+id/widget_section_status_row"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingStart="14dp">
+            <TextView
+                android:id="@+id/widget_section_dot"
+                android:layout_width="12dp"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:textSize="12sp" />
+            <TextView
+                android:id="@+id/widget_section_status"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:paddingStart="4dp"
+                android:textSize="12sp" />
+        </LinearLayout>
+        <TextView
+            android:id="@+id/widget_section_speeds"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingStart="30dp"
+            android:gravity="left"
+            android:textSize="12sp" />
+        <ImageView
+            android:id="@+id/widget_section_chart"
+            android:layout_width="match_parent"
+            android:layout_height="20dp"
+            android:paddingStart="30dp"
+            android:scaleType="fitXY"
+            android:visibility="gone" />
+    </LinearLayout>
+</LinearLayout>
+</FrameLayout>

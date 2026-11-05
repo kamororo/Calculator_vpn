@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2.34: forest — deep green to emerald. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <gradient
+        android:angle="45"
+        android:startColor="#1B5E20"
+        android:centerColor="#2E7D32"
+        android:endColor="#66BB6A"
+        android:type="linear" />
+    <corners android:radius="28dp" />
+</shape>

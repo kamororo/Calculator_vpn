@@ -14,6 +14,7 @@ import org.json.JSONObject
 
 class RenameActivity : Activity() {
     private fun L(fa: String, en: String): String = AppLanguage.t(this, fa, en)
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
     private lateinit var inputF: EditText
     private lateinit var namesF: EditText
     private lateinit var outputF: EditText
@@ -27,16 +28,21 @@ class RenameActivity : Activity() {
         scroll.setBackgroundColor(Theme.bg(this))
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 32, 32, 32)
+            // 2.59: dp paddings (were raw px).
+            setPadding(dp(16), dp(16), dp(16), dp(16))
             setBackgroundColor(Theme.bg(this@RenameActivity))
         }
         scroll.addView(root)
-        fun label(text: String, size: Float = 18f) = TextView(this).apply {
-            this.text = text; textSize = size; setPadding(0, 24, 0, 8)
+        fun label(text: String, size: Float = 15f) = TextView(this).apply {
+            this.text = text; textSize = size
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, dp(12), 0, dp(4))
             setTextColor(Theme.fg(this@RenameActivity))
         }
         fun note(text: String) = TextView(this).apply {
-            this.text = text; setTextColor(Theme.subFg(this@RenameActivity)); textSize = 14f
+            this.text = text
+            setTextColor(Theme.subFg(this@RenameActivity)); textSize = 13f
+            setPadding(0, 0, 0, dp(2))
         }
         // Fixed-height boxes with their OWN internal scroll:
         // no matter how many configs are pasted, the box never
@@ -45,7 +51,20 @@ class RenameActivity : Activity() {
         fun box(heightDp: Int, hint: String): EditText = EditText(this).apply {
             this.hint = hint
             gravity = Gravity.TOP
+            textSize = 14f
             setTextColor(Color.BLACK)
+            // 2.62: softer glass box — larger radius,
+            // softer stroke, a touch of elevation and
+            // padding, same fixed heights and internal
+            // scroll as before.
+            background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadius = dp(18).toFloat()
+                setColor(Color.WHITE)
+                setStroke(dp(1), Color.parseColor("#FFDADADA"))
+            }
+            elevation = 2f
+            setPadding(dp(12), dp(12), dp(12), dp(12))
             isVerticalScrollBarEnabled = true
             movementMethod = android.text.method.ScrollingMovementMethod.getInstance()
             layoutParams = LinearLayout.LayoutParams(
@@ -60,24 +79,41 @@ class RenameActivity : Activity() {
             }
         }
         root.addView(TextView(this).apply {
-            text = L("تغییر نام کانفیگ‌های v2ray", "Rename v2ray configs"); textSize = 22f
+            text = L("تغییر نام کانفیگ‌های v2ray", "Rename v2ray configs"); textSize = 20f
+            setTypeface(null, android.graphics.Typeface.BOLD)
             setTextColor(Theme.fg(this@RenameActivity))
         })
         // --- Part 1 ---
         root.addView(label(L("۱) کانفیگ‌ها", "1) Configs")))
-        root.addView(note(L("هر کانفیگ را در یک خط بچسبان. هر تعدادی که بخواهی.", "Paste each config on one line, as many as you want.")))
+        root.addView(note(L("هر کانفیگ در یک خط؛ هر تعدادی که بخواهی.", "One config per line, as many as you want.")))
         inputF = box(240, "vless://...\nvmess://...\ntrojan://...")
         root.addView(inputF)
         // --- Part 2 ---
         root.addView(label(L("۲) نام‌های جدید", "2) New names")))
-        root.addView(note(
-            L("هر خط یک نام است برای کانفیگ هم‌ردیفش.\n", "Each line is a name for the config on the same row.\n") +
-            L("اگر فقط یک نام بنویسی، همه کانفیگ‌ها دقیقاً همان نام را می‌گیرند؛ بدون شماره.", "If you write only one name, every config gets exactly that name, with no numbering.")
-        ))
+        root.addView(note(L("هر خط یک نام برای کانفیگ هم‌ردیفش؛ یک نام تنها = همان نام برای همه، بدون شماره.", "Each line names the config on its row; a single name applies to all, with no numbering.")))
         namesF = box(160, L("نام جدید\nمثلاً: سرور", "New name\ne.g.: server"))
         root.addView(namesF)
         val renameBtn = Button(this).apply {
             text = L("تغییر نام‌ها", "Rename")
+            textSize = 15f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            // 2.59: full-width teal gradient pill
+            // (was a white glass box, raw-px pads).
+            background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadius = dp(24).toFloat()
+                orientation = android.graphics.drawable.GradientDrawable.Orientation.TL_BR
+                colors = intArrayOf(
+                    Color.parseColor("#FF0F766E"), Color.parseColor("#FF26A69A"))
+            }
+            elevation = 4f
+            setPadding(0, dp(10), 0, dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(8)
+            }
             setOnClickListener { doRename() }
         }
         root.addView(renameBtn)
@@ -86,15 +122,29 @@ class RenameActivity : Activity() {
         outputF = box(240, L("نتیجه اینجا نشان داده می‌شود", "The result will be shown here"))
         root.addView(outputF)
         statusText = TextView(this).apply {
-            setPadding(0, 12, 0, 12)
+            setPadding(0, dp(8), 0, dp(8))
             setTextColor(Theme.fg(this@RenameActivity))
         }
         root.addView(statusText)
         // --- Bottom copy button ---
         val copyBtn = Button(this).apply {
             text = L("کپی همه کانفیگ‌های تغییرنام‌داده‌شده", "Copy all renamed configs")
-            textSize = 17f
-            setPadding(0, 24, 0, 24)
+            textSize = 15f
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setTextColor(Color.parseColor("#FF0F766E"))
+            // 2.59: full-width white outline pill
+            // (was a white glass box, raw-px pads).
+            background = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.RECTANGLE
+                cornerRadius = dp(24).toFloat()
+                setStroke(dp(2), Color.parseColor("#FF0F766E"))
+                setColor(Color.WHITE)
+            }
+            elevation = 4f
+            setPadding(0, dp(10), 0, dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT)
             setOnClickListener {
                 val text = outputF.text.toString().trim()
                 if (text.isBlank()) {
@@ -186,6 +236,9 @@ class RenameActivity : Activity() {
             }
         }
         outputF.setText(out.joinToString("\n"))
+        if (!quiet) AppLog.append(this, "renamer",
+            "$renamed تا از ${configs.size} کانفیگ تغییر نام داده شد.",
+            "$renamed of ${configs.size} configs renamed.")
         if (!quiet) statusText.text = L("$renamed تا از ${configs.size} کانفیگ تغییر نام داده شد.", "$renamed of ${configs.size} configs renamed.") +
             if (dupRemoved > 0) L(" $dupRemoved کانفیگ تکراری (فقط اسمشان فرق داشت) حذف شد.", " $dupRemoved duplicate configs (only their names differed) removed.") else "" +
             if (renamed < configs.size) L(" برای بقیه نام ننوشته بودی، همان نام قبلی ماند.", " For the rest, where you wrote no name, the previous name stayed.") else ""

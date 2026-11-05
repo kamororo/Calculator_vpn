@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.renamer"
-    android:versionCode="63"
-    android:versionName="1.62">
+    android:versionCode="179"
+    android:versionName="2.63">
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="36" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.CAMERA" />
@@ -18,12 +18,15 @@
          without it) and POST_NOTIFICATIONS. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Smart Connect must list every installed app (Telegram,
          Instagram, ...) to let the user pick triggers. Without
          this, Android 11+ package visibility hides most
          third-party apps from getInstalledApplications. -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
     <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Android 14+ (targetSdk 34): a foreground service
          MUST declare its type, otherwise startForeground()
          throws MissingForegroundServiceTypeException, which
@@ -35,6 +38,7 @@
          saw in v1.24 right after CONNECTING. VPN has no
          dedicated type, so specialUse + its permission. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.VIBRATE" />
     <application android:label="calculator" android:icon="@mipmap/ic_launcher" android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <activity android:name=".PinActivity" android:exported="true" android:screenOrientation="portrait">
             <intent-filter>
@@ -42,6 +46,20 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- 2.16: the beautiful icon. Disabled by default
+             (the calculator icon stays the default); the
+             Settings / Personalization section toggles it. -->
+        <activity-alias android:name=".AliasBeautiful"
+            android:targetActivity=".PinActivity"
+            android:icon="@mipmap/ic_beautiful"
+            android:label="ConfigRenamer"
+            android:exported="true"
+            android:enabled="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
         <activity android:name=".HomeActivity" android:exported="false" android:screenOrientation="portrait" />
         <activity android:name=".RenameActivity" android:exported="false" android:screenOrientation="portrait" />
         <activity android:name=".SubscriptionActivity" android:exported="false" android:screenOrientation="portrait" />
@@ -97,17 +115,31 @@
             android:name="com.wireguard.android.backend.GoBackend$VpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"
             android:exported="false" />
+        <!-- AmneziaWG Go backend's own VpnService (same shape as
+             WireGuard's, but loading libawg-go.so). Declared
+             alongside the WG service so both engines coexist. -->
+        <service
+            android:name="org.amnezia.awg.backend.GoBackend$VpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:exported="false" />
         <activity android:name=".HomeSettingsActivity" android:exported="false" android:screenOrientation="portrait" />
         <activity android:name=".ReorderActivity" android:exported="false" android:screenOrientation="portrait" />
         <activity android:name=".ChangePublicPinActivity" android:exported="false" android:screenOrientation="portrait" />
         <activity android:name=".ChainActivity" android:screenOrientation="portrait" />
+        <activity android:name=".AppLogActivity" android:screenOrientation="portrait" />
+        <activity android:name=".SecretLanguageActivity" android:screenOrientation="portrait" />
+        <activity android:name=".AlienHubActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".AlienSubActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".AlienSenderHistoryActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".AlienMessengerActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".AlienHostActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".VersionHistoryActivity" android:screenOrientation="portrait" />
         <activity android:name=".HydraActivity" android:screenOrientation="portrait" />
         <activity android:name=".HydraOptionsActivity" android:screenOrientation="portrait" />
         <activity android:name=".HydraReportActivity" android:screenOrientation="portrait" />
         <activity android:name=".GuideDetailActivity" android:screenOrientation="portrait" />
-        <activity android:name=".WidgetToggleActivity" android:theme="@android:style/Theme.Translucent.NoTitleBar" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".WidgetToggleActivity" android:theme="@android:style/Theme.Translucent.NoTitleBar" android:exported="false" android:screenOrientation="portrait"  android:taskAffinity="" android:excludeFromRecents="true"/>
         <activity android:name=".WelcomeActivity" android:exported="false" android:screenOrientation="portrait" />
-        <activity android:name=".WidgetPickerActivity" android:exported="false" android:screenOrientation="portrait" />
         <activity android:name=".LoginPersonalizationActivity" android:exported="false" android:screenOrientation="portrait" />
         <activity android:name=".GuideActivity" android:exported="false" android:screenOrientation="portrait" />
         <activity android:name=".ScanActivity" android:exported="false" android:screenOrientation="portrait" />
@@ -123,8 +155,20 @@
         <activity android:name=".SmartConnectActivity" android:exported="false" android:screenOrientation="portrait" />
         <activity android:name=".VpnSubActivity" android:exported="false" android:screenOrientation="portrait" />
         <activity android:name=".VpnSubEditActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".CloudflareActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".WidgetStudioActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".WidgetCustomizeActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".AlienQuickReplyActivity" android:exported="false" android:screenOrientation="portrait"  android:theme="@android:style/Theme.Material.Light.Dialog.NoActionBar" android:excludeFromRecents="true"/>
+        <activity android:name=".StudioToggleActivity" android:exported="false" android:screenOrientation="portrait" android:theme="@android:style/Theme.Translucent.NoTitleBar"  android:taskAffinity="" android:excludeFromRecents="true"/>
+        <receiver android:name=".AlienWidgetPollReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
         <service android:name=".ProxyOnlyService" android:exported="false" android:foregroundServiceType="specialUse" />
         <service android:name=".PingTestService" android:exported="false" android:foregroundServiceType="dataSync" />
+        <service android:name=".WgTestService" android:exported="false" android:foregroundServiceType="dataSync" />
         <service android:name=".SmartConnectService" android:exported="false" android:foregroundServiceType="dataSync" />
         <service android:name=".HydraService" android:exported="false" android:foregroundServiceType="dataSync" />
         <receiver android:name=".VpnWidgetProvider" android:exported="false">
@@ -138,6 +182,33 @@
         <receiver android:name=".OvpnWidgetProvider" android:exported="false">
             <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
             <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_openvpn" />
+        </receiver>
+        <receiver android:name=".AlienWidgetProvider" android:exported="false">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_alien" />
+        </receiver>
+        <receiver android:name=".SectionWidgetProvider" android:exported="false">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_section" />
+        </receiver>
+        <receiver android:name=".SectionWidgetSmall" android:exported="false">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_section_small" />
+        </receiver>
+        <receiver android:name=".SectionWidgetLarge" android:exported="false">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_section_large" />
+        </receiver>
+        <receiver android:name=".AlienChatWidgetProvider" android:exported="false">
+            <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE" /></intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_chat" />
+        </receiver>
+        <service android:name=".AlienChatWidgetService" android:permission="android.permission.BIND_REMOTEVIEWS" android:exported="false" />
+        <receiver android:name=".AlienSubCheckReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
         </receiver>
         <receiver android:name=".VpnActionReceiver" android:exported="false" />
             <receiver android:name=".SmartBootReceiver" android:exported="true">

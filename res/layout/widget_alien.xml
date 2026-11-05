@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 2.27 Alien Message widget: the latest received
+     message on the home screen. Tap opens the
+     receiver page. RemoteViews-supported views only. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_alien_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_bg"
+    android:orientation="vertical"
+    android:padding="12dp">
+
+    <TextView
+        android:id="@+id/widget_alien_title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="پیام بیگانه"
+        android:textColor="#1A237E"
+        android:textSize="12sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/widget_alien_text"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:ellipsize="end"
+        android:maxLines="3"
+        android:text="هنوز پیامی نیامده است"
+        android:textColor="#1A1A1A"
+        android:textSize="14sp" />
+</LinearLayout>

@@ -74,7 +74,7 @@ object VpnNotification {
 
     fun kindLabel(ctx: Context, kind: String): String = when (kind) {
         "emergency" -> AppLanguage.t(ctx, "اتصال اضطراری", "Emergency")
-        "wireguard" -> "WireGuard"
+        "wireguard" -> "وایرگارد و امنزیا"
         "openvpn" -> "OpenVPN"
         else -> "v2ray"
     }
@@ -113,31 +113,82 @@ object VpnNotification {
         return parts.joinToString(" • ")
     }
 
+    private val splitLock = Any()
+
+    /** Current tunnel throughput split into down/up KB/s, or
+     *  (-1, -1) when unknown (the first call only establishes
+     *  the baseline, like currentSpeedKbps). Same source and
+     *  same limits: total TUN traffic, not per-config. The
+     *  baseline lives in SharedPreferences so it survives
+     *  process death: the 2.33 in-memory baseline was wiped
+     *  whenever the provider process died, so speeds stayed
+     *  dashes forever. Calls closer than 1s apart return
+     *  unknown WITHOUT moving the baseline, so a burst of
+     *  widget updates cannot produce absurd rates.
+     *  Safe to call from any thread; never throws. */
+    fun currentSpeedsKbps(ctx: Context): Pair<Long, Long> {
+        return try {
+            var rx = 0L
+            var tx = 0L
+            var found = false
+            for (line in File("/proc/net/dev").readLines()) {
+                val trimmed = line.trim()
+                if (!trimmed.contains(":")) continue
+                val iface = trimmed.substringBefore(":").trim()
+                if (!(iface.startsWith("tun") || iface.startsWith("wg") ||
+                    iface.startsWith("awg") || iface.startsWith("amnezia") ||
+                    iface.startsWith("ovpn") || iface.startsWith("ppp"))) continue
+                val fields = trimmed.substringAfter(":").trim().split(Regex("\\s+"))
+                if (fields.size < 9) continue
+                val r = fields[0].toLongOrNull() ?: continue
+                val t = fields[8].toLongOrNull() ?: continue
+                rx += r; tx += t; found = true
+            }
+            if (!found) return Pair(-1L, -1L)
+            val now = System.currentTimeMillis()
+            synchronized(splitLock) {
+                val prefs = ctx.getSharedPreferences("renamer_widget_speeds", Context.MODE_PRIVATE)
+                val prevRx = prefs.getLong("rx", -1)
+                val prevTx = prefs.getLong("tx", -1)
+                val prevT = prefs.getLong("t", 0)
+                if (prevRx < 0 || prevT <= 0 || rx < prevRx || tx < prevTx) {
+                    prefs.edit().putLong("rx", rx).putLong("tx", tx).putLong("t", now).apply()
+                    return Pair(-1L, -1L)
+                }
+                val dt = now - prevT
+                if (dt < 1000) return Pair(-1L, -1L)
+                val down = (rx - prevRx) * 1000 / dt / 1024
+                val up = (tx - prevTx) * 1000 / dt / 1024
+                prefs.edit().putLong("rx", rx).putLong("tx", tx).putLong("t", now).apply()
+                Pair(down.coerceAtLeast(0), up.coerceAtLeast(0))
+            }
+        } catch (_: Exception) {
+            Pair(-1L, -1L)
+        }
+    }
+
     /** Current tunnel throughput in KB/s, or -1 when
      *  unknown (first call, or any read/parse failure).
      *  Safe to call from any thread; never throws. */
     fun currentSpeedKbps(): Long {
         return try {
-            var rx = -1L
-            var tx = -1L
-            var firstTunRx = -1L
-            var firstTunTx = -1L
+            var total = 0L
+            var found = false
             for (line in File("/proc/net/dev").readLines()) {
                 val trimmed = line.trim()
                 if (!trimmed.contains(":")) continue
                 val iface = trimmed.substringBefore(":").trim()
-                if (!iface.startsWith("tun")) continue
+                if (!(iface.startsWith("tun") || iface.startsWith("wg") ||
+                    iface.startsWith("awg") || iface.startsWith("amnezia") ||
+                    iface.startsWith("ovpn") || iface.startsWith("ppp"))) continue
                 val fields = trimmed.substringAfter(":").trim()
                     .split(Regex("\\s+"))
                 if (fields.size < 9) continue
                 val r = fields[0].toLongOrNull() ?: continue
                 val t = fields[8].toLongOrNull() ?: continue
-                if (firstTunRx < 0) { firstTunRx = r; firstTunTx = t }
-                if (iface == "tun0") { rx = r; tx = t; break }
+                total += r + t; found = true
             }
-            if (rx < 0) { rx = firstTunRx; tx = firstTunTx }
-            if (rx < 0 || tx < 0) return -1
-            val total = rx + tx
+            if (!found) return -1
             val now = System.currentTimeMillis()
             synchronized(speedLock) {
                 if (lastBytes < 0 || lastTimeMs <= 0) {

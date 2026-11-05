@@ -6,6 +6,7 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
 import android.net.VpnService
 import android.os.Bundle
 import android.widget.RemoteViews
@@ -52,6 +53,8 @@ object WidgetRefresh {
         try { VpnWidgetProvider().updateAllWidgets(ctx) } catch (_: Exception) {}
         try { WgWidgetProvider().updateAllWidgets(ctx) } catch (_: Exception) {}
         try { OvpnWidgetProvider().updateAllWidgets(ctx) } catch (_: Exception) {}
+        try { SectionWidgetProvider.updateAllWidgets(ctx) } catch (_: Exception) {}
+        try { AlienChatWidgetProvider.updateAllWidgets(ctx) } catch (_: Exception) {}
     }
 }
 
@@ -65,8 +68,32 @@ abstract class WidgetProviderBase : AppWidgetProvider() {
 
     private fun widgetSetting(ctx: Context, key: String, def: String): String {
         return try {
-            ctx.getSharedPreferences(WIDGET_PREFS, Context.MODE_PRIVATE)
-                .getString(key + "_" + sectionKey(), def) ?: def
+            val p = ctx.getSharedPreferences(WIDGET_PREFS, Context.MODE_PRIVATE)
+            val full = key + "_" + sectionKey()
+            if (p.contains(full)) p.getString(full, def) ?: def
+            else if (key == "widget_color") studioColorFallback(ctx, def)
+            else def
+        } catch (_: Exception) { def }
+    }
+
+    /** the old color/size/icon keys have no writer
+     *  any more (the studio writes different prefs). When
+     *  an old widget has no explicit colour, fall back to
+     *  the studio's section colour — the same named set
+     *  (blue/pink/lavender/orange/mint) — so studio-styled
+     *  sections tint old widgets too. An explicit old key
+     *  still wins. Size/icon have no section-level studio
+     *  value (theirs are per widget id), so they keep
+     *  their defaults. */
+    private fun studioColorFallback(ctx: Context, def: String): String {
+        return try {
+            val c = ctx.getSharedPreferences("renamer_widget_style", Context.MODE_PRIVATE)
+                .getString("color_section_" + sectionKey(), "") ?: ""
+            if (c in setOf("blue", "pink", "lavender", "orange", "mint")) {
+                if (loggedColorFallback.add(sectionKey())) {
+                                    }
+                c
+            } else def
         } catch (_: Exception) { def }
     }
 
@@ -90,10 +117,47 @@ abstract class WidgetProviderBase : AppWidgetProvider() {
             // never for another section's session.
             VpnClientService.isRunning &&
                 VpnClientService.sessionTag in arrayOf("v2ray", "smart", null)
+        } else if (sectionKey() == "openvpn") {
+            // only a fallback while the engine has never
+            // run in this process (genuinely unknown);
+            // a stale pref must not paint a dead tunnel
+            // as connected.
+            try {
+                if (OvpnEngine.isConnected) true
+                else if (OvpnEngine.isConnecting || OvpnEngine.activeName != null || OvpnEngine.lastState != null) {
+                    if (prefState(ctx)) logLiveDisagree(ctx, "openvpn")
+                    false
+                } else prefState(ctx)
+            } catch (_: Exception) { prefState(ctx) }
+        } else if (sectionKey() == "wireguard") {
+            // WgDirect.isLive asks the GoBackends whether
+            // a tunnel is really running.
+            try {
+                if (WgDirect.isLive(ctx)) true
+                else {
+                    if (prefState(ctx)) logLiveDisagree(ctx, "wireguard")
+                    false
+                }
+            } catch (_: Exception) { prefState(ctx) }
         } else {
-            ctx.getSharedPreferences(WIDGET_PREFS, Context.MODE_PRIVATE)
-                .getBoolean("widget_state_" + sectionKey(), false)
+            prefState(ctx)
         }
+    }
+
+    private fun prefState(ctx: Context): Boolean = try {
+        ctx.getSharedPreferences(WIDGET_PREFS, Context.MODE_PRIVATE)
+            .getBoolean("widget_state_" + sectionKey(), false)
+    } catch (_: Exception) { false }
+
+    /** one line per section per process when live
+     *  state overrules a stale widget flag (widget renders
+     *  happen on system schedule, so every render must
+     *  not spam the central log). */
+    private fun logLiveDisagree(ctx: Context, key: String) {
+        try {
+            if (loggedLiveDisagree.add(key)) {
+                            }
+        } catch (_: Exception) {}
     }
 
     private fun widgetPrefs(ctx: Context) =
@@ -143,6 +207,17 @@ abstract class WidgetProviderBase : AppWidgetProvider() {
         }
         val connected = try { isConnected(ctx) } catch (_: Exception) { false }
         val views = RemoteViews(ctx.packageName, layout)
+        // 2.32: Studio style (glass/minimal/neon) applies to all
+        // widgets of this section; the orb colour stays section-level.
+        try {
+            val style = WidgetStyle.styleForSection(ctx, sectionKey())
+            views.setInt(R.id.widget_root, "setBackgroundResource",
+                WidgetStyle.bgRes(style))
+            if (WidgetStyle.isDark(style) && layout != R.layout.widget_small) {
+                views.setTextColor(R.id.widget_name, Color.WHITE)
+                views.setTextColor(R.id.widget_status, Color.WHITE)
+            }
+        } catch (_: Exception) {}
         views.setInt(
             R.id.widget_btn, "setBackgroundResource",
             if (connected) R.drawable.widget_circle_on else offCircleRes(ctx)
@@ -164,6 +239,10 @@ abstract class WidgetProviderBase : AppWidgetProvider() {
                 R.id.widget_status,
                 if (connected) L(ctx, "وصل است", "Connected")
                 else L(ctx, "قطع است", "Disconnected")
+            )
+            views.setInt(
+                R.id.widget_dot, "setBackgroundResource",
+                if (connected) R.drawable.widget_dot_on else R.drawable.widget_dot_off
             )
         }
         if (layout == R.layout.widget_large) {
@@ -229,11 +308,10 @@ abstract class WidgetProviderBase : AppWidgetProvider() {
 
     private fun stopVpn(ctx: Context) {
         try {
-            val stop = Intent(ctx, VpnClientService::class.java).apply { action = "STOP" }
+            val stop = Intent(ctx, VpnClientService::class.java).apply { action = "STOP" ; putExtra("stop_gen", VpnClientService.sessionGen) }
             ctx.startService(stop)
         } catch (_: Exception) {
         }
-        try { ctx.stopService(Intent(ctx, VpnClientService::class.java)) } catch (_: Exception) {}
         VpnClientService.isRunning = false
         VpnClientService.currentName = null
         VpnClientService.sessionTag = null
@@ -349,6 +427,10 @@ abstract class WidgetProviderBase : AppWidgetProvider() {
     }
 
     companion object {
+        // above (widget renders repeat on system schedule).
+        private val loggedLiveDisagree = mutableSetOf<String>()
+        private val loggedColorFallback = mutableSetOf<String>()
+
         const val ACTION_TOGGLE = "com.renamer.WIDGET_TOGGLE"
         const val ACTION_RESTART = "com.renamer.WIDGET_RESTART"
         const val EXTRA_SECTION = "widget_section"

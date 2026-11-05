@@ -22,9 +22,13 @@ import android.widget.*
  *  page, the report on its own page. */
 class HydraActivity : Activity() {
     private fun L(fa: String, en: String): String = AppLanguage.t(this, fa, en)
+    // ADAPTIVE ENGINE (1.78) report button.
+    private var engineReportBtn: android.widget.Button? = null
     private fun dp(v: Int): Int = HydraUi.dp(this, v)
 
     private lateinit var circleBtn: Button
+    private var hydraRingView: android.view.View? = null
+    private var hydraRingAnim: android.view.animation.RotateAnimation? = null
     private lateinit var sourceLine: TextView
     private val handler = Handler(Looper.getMainLooper())
     private val poller = object : Runnable {
@@ -51,13 +55,19 @@ class HydraActivity : Activity() {
         scroll.addView(root)
         setContentView(scroll)
 
-        val topRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        topRow.addView(HydraUi.glassButton(this, L("بازگشت", "Back")) { finish() })
+        // Top row: title only (1.81: the back
+        // button was removed — system Back (or the
+        // gesture) returns to the previous page).
+        val topRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
         topRow.addView(TextView(this).apply {
             text = L("هیدرا", "Hydra")
-            textSize = 22f
+            textSize = 19f
             setTypeface(null, android.graphics.Typeface.BOLD)
-            setPadding(dp(16), dp(8), 0, 0)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(8), 0, 0)
         })
         root.addView(topRow)
 
@@ -118,24 +128,88 @@ class HydraActivity : Activity() {
         optionBtn(L("راهنما", "Guide")) { showWhatIsHydra() }
         root.addView(row)
 
-        // The power control: a big glass circle at
-        // the bottom of the page.
-        circleBtn = Button(this).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(170), dp(170)).apply {
+        // ADAPTIVE ENGINE (1.78): minimal report
+        // button, visible only while the engine is
+        // on (visibility refreshed in onResume).
+        // Hydra's engine-first lives in
+        // HydraEngine.resolveEndpoints (alternate
+        // IPs ahead of each original endpoint);
+        // this button shows what it did.
+        engineReportBtn = AdaptiveEngine.reportButton(this, AdaptiveEngine.S_HYDRA).apply {
+            visibility = if (AdaptiveEngine.isEnabled(this@HydraActivity)) View.VISIBLE else View.GONE
+        }
+        root.addView(engineReportBtn)
+
+        // TEST-ONLY Hydra desync log button, separate
+        // from the Report button above: delete this
+        // block with HydraDesyncLog.kt when the
+        // test log goes.
+        root.addView(HydraUi.glassButton(this, L("گزارش دی‌سینک (آزمایشی)", "Desync report (test)")) {
+            HydraDesyncLog.showDialog(this@HydraActivity)
+        }.apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                // 1.81: breathing room between this
+                // report button and the connect
+                // circle below (they used to touch).
+                topMargin = dp(20)
+                bottomMargin = dp(20)
+            }
+        })
+
+        // The power control: two circles, as in the
+        // design — a constant outer glass ring (same
+        // soft light-to-dark shade in every state)
+        // and the inner circle, whose hue alone
+        // changes: blue off, soft yellow waiting,
+        // green connected. The outer ring never
+        // changes with state.
+        val hydraWrap = android.widget.FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(190), dp(190)).apply {
                 gravity = Gravity.CENTER_HORIZONTAL
                 bottomMargin = dp(16)
             }
+        }
+        val hydraRing = View(this).apply {
+            background = HydraUi.SweepRingDrawable(
+                Color.parseColor("#90CAF9"), this@HydraActivity, 3f)
+            layoutParams = android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT)
+        }
+        hydraRingView = hydraRing
+        hydraWrap.addView(hydraRing)
+        // Slow, classy rotation, exactly like Emergency's rim (14s).
+        hydraRingAnim = android.view.animation.RotateAnimation(0f, 360f,
+                android.view.animation.Animation.RELATIVE_TO_SELF, 0.5f,
+                android.view.animation.Animation.RELATIVE_TO_SELF, 0.5f).apply {
+                duration = 14000
+                interpolator = android.view.animation.LinearInterpolator()
+                repeatCount = android.view.animation.Animation.INFINITE
+            }
+            hydraRing.startAnimation(hydraRingAnim)
+        circleBtn = Button(this).apply {
+            layoutParams = android.widget.FrameLayout.LayoutParams(dp(170), dp(170), Gravity.CENTER)
             textSize = 20f
             setTypeface(null, android.graphics.Typeface.BOLD)
             elevation = 8f
             setOnClickListener { onCircleTapped() }
         }
-        root.addView(circleBtn)
+        hydraWrap.addView(circleBtn)
+        root.addView(hydraWrap)
     }
 
     override fun onResume() {
         super.onResume()
         refreshAll()
+        // The Hydra ring keeps spinning; restart it if the window dropped it.
+        try {
+            val rv = hydraRingView; val ra = hydraRingAnim
+            if (rv != null && ra != null && rv.animation == null) rv.startAnimation(ra)
+        } catch (_: Exception) {}
+        AdaptiveEngine.setReportVisible(engineReportBtn, this, AdaptiveEngine.S_HYDRA)
         handler.postDelayed(poller, 2000)
     }
 
@@ -163,20 +237,20 @@ class HydraActivity : Activity() {
         when {
             HydraEngine.hydraOwnsVpn() -> {
                 circleBtn.text = L("توقف", "Stop")
-                circleBtn.background = HydraUi.glassCircleBg(
-                    Color.parseColor("#D9C8EAD4"), Color.parseColor("#FF2E9E5B"))
+                circleBtn.background = HydraUi.hydraBtnBg(
+                    Color.parseColor("#C8EAD4"), Color.parseColor("#2E9E5B"), this@HydraActivity)
                 circleBtn.setTextColor(Color.parseColor("#FF1B5E33"))
             }
             active -> {
                 circleBtn.text = L("توقف", "Stop")
-                circleBtn.background = HydraUi.glassCircleBg(
-                    Color.parseColor("#D9FDEBC8"), Color.parseColor("#FFE8913A"))
-                circleBtn.setTextColor(Color.parseColor("#FF7A4A00"))
+                circleBtn.background = HydraUi.hydraBtnBg(
+                    Color.parseColor("#FDEEB8"), Color.parseColor("#E3B93E"), this@HydraActivity)
+                circleBtn.setTextColor(Color.parseColor("#7A4A00"))
             }
             else -> {
                 circleBtn.text = L("اتصال", "Connect")
-                circleBtn.background = HydraUi.glassCircleBg(
-                    Color.parseColor("#D9FFFFFF"), Color.parseColor("#FF9AA0A6"))
+                circleBtn.background = HydraUi.hydraBtnBg(
+                    Color.parseColor("#8FC1EA"), Color.parseColor("#5B9BD5"), this@HydraActivity)
                 circleBtn.setTextColor(Color.BLACK)
             }
         }

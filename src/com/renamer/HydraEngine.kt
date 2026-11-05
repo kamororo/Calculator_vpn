@@ -55,6 +55,13 @@ object HydraEngine {
     private const val LOG_KEY = "hydra_log"
     private const val MAX_LOG = 300
 
+    /** Actual fragment params of the last desync
+     *  attempt (set by desyncFrag, read by
+     *  attempt() for the desync test log).
+     *  Attempts run sequentially on one thread,
+     *  so a volatile holder is enough. */
+    @Volatile var lastDesyncParams: String? = null
+
     /** Tasting shapes. Only PLAIN, FRAGMENT
      *  variants, FINGERPRINT variants, ALPN
      *  variants and MUX are client-side-only: they
@@ -67,6 +74,7 @@ object HydraEngine {
     enum class Strategy {
         PLAIN,
         FRAGMENT, FRAGMENT_SPLIT, FRAGMENT_LONG,
+        DESYNC_CLASSIC, DESYNC_CLASSIC_LONG, DESYNC_TINY, DESYNC_MID, DESYNC_WIDE, DESYNC_SLOW, DESYNC_NOISE, DESYNC_SPLIT2, DESYNC_LONG2,
         FINGERPRINT, FINGERPRINT_FIREFOX, FINGERPRINT_SAFARI, FINGERPRINT_RANDOM,
         ALPN_H2, ALPN_HTTP11, ALPN_NONE,
         WS, GRPC, MUX
@@ -98,6 +106,12 @@ object HydraEngine {
         val maxEndpoints: Int = 3,
         val budgetSec: Int = 90,
         val useFragment: Boolean = true,
+        /** Hydra-only advanced desync: desync
+         *  shapes first, jittered per attempt,
+         *  winner combination first. Default OFF:
+         *  when off, Hydra behaves exactly as
+         *  before and no other section is touched. */
+        val useDesync: Boolean = false,
         val useFingerprint: Boolean = true,
         val useWs: Boolean = true,
         val useGrpc: Boolean = true,
@@ -123,6 +137,7 @@ object HydraEngine {
             maxEndpoints = (p.getString("max_endpoints", "5") ?: "5").toIntOrNull()?.coerceIn(1, 10) ?: 5,
             budgetSec = (p.getString("budget_sec", "90") ?: "90").toIntOrNull()?.coerceIn(30, 600) ?: 90,
             useFragment = p.getBoolean("use_fragment", true),
+            useDesync = p.getBoolean("use_desync", false),
             useFingerprint = p.getBoolean("use_fingerprint", true),
             useWs = p.getBoolean("use_ws", true),
             useGrpc = p.getBoolean("use_grpc", true),
@@ -141,6 +156,7 @@ object HydraEngine {
             .putString("max_endpoints", o.maxEndpoints.toString())
             .putString("budget_sec", o.budgetSec.toString())
             .putBoolean("use_fragment", o.useFragment)
+            .putBoolean("use_desync", o.useDesync)
             .putBoolean("use_fingerprint", o.useFingerprint)
             .putBoolean("use_ws", o.useWs)
             .putBoolean("use_grpc", o.useGrpc)
@@ -153,11 +169,22 @@ object HydraEngine {
             .apply()
     }
 
+    fun isDesyncStrategy(s: Strategy): Boolean = s.name.startsWith("DESYNC_")
+
     fun strategyLabel(ctx: Context, s: Strategy): String = when (s) {
         Strategy.PLAIN -> AppLanguage.t(ctx, "ساده (بدون تغییر)", "Plain (no change)")
         Strategy.FRAGMENT -> AppLanguage.t(ctx, "Fragment (tlshello)", "Fragment (tlshello)")
         Strategy.FRAGMENT_SPLIT -> AppLanguage.t(ctx, "Fragment (تکه ۱ تا ۳)", "Fragment (split 1-3)")
         Strategy.FRAGMENT_LONG -> AppLanguage.t(ctx, "Fragment (تکه‌های بلند)", "Fragment (long splits)")
+        Strategy.DESYNC_CLASSIC -> AppLanguage.t(ctx, "دی‌سینک کلاسیک (همان برد قبلی، بدون تغییر)", "Desync classic (the previous win, unchanged)")
+        Strategy.DESYNC_CLASSIC_LONG -> AppLanguage.t(ctx, "دی‌سینک کلاسیک بلند", "Desync classic long")
+        Strategy.DESYNC_TINY -> AppLanguage.t(ctx, "دی‌سینک ریز (تکه‌ی اول، کوتاه)", "Desync tiny (first packet, short)")
+        Strategy.DESYNC_MID -> AppLanguage.t(ctx, "دی‌سینک میانی (۱ تا ۲)", "Desync mid (1-2)")
+        Strategy.DESYNC_WIDE -> AppLanguage.t(ctx, "دی‌سینک گسترده (۱ تا ۵)", "Desync wide (1-5)")
+        Strategy.DESYNC_SLOW -> AppLanguage.t(ctx, "دی‌سینک کند (تأخیر زیاد)", "Desync slow (long delays)")
+        Strategy.DESYNC_NOISE -> AppLanguage.t(ctx, "دی‌سینک نویزی (نویز سنگین)", "Desync noisy (heavy noise)")
+        Strategy.DESYNC_SPLIT2 -> AppLanguage.t(ctx, "دی‌سینک تکه‌ی دوم (۱ تا ۳، کوتاه)", "Desync split 2 (1-3, short)")
+        Strategy.DESYNC_LONG2 -> AppLanguage.t(ctx, "دی‌سینک بلند ۲ (تکه‌های خیلی بلند)", "Desync long 2 (very long splits)")
         Strategy.FINGERPRINT -> AppLanguage.t(ctx, "اثر انگشت کروم", "Chrome fingerprint")
         Strategy.FINGERPRINT_FIREFOX -> AppLanguage.t(ctx, "اثر انگشت فایرفاکس", "Firefox fingerprint")
         Strategy.FINGERPRINT_SAFARI -> AppLanguage.t(ctx, "اثر انگشت سافاری", "Safari fingerprint")
@@ -268,7 +295,30 @@ object HydraEngine {
             val ob = proxy ?: return null
             val protocol = ob.optString("protocol", "").lowercase()
             val ss = ob.optJSONObject("streamSettings")
-            fun putFragment(packets: String, length: String, delay: String, maxSplit: Int): Boolean {
+            // Desync jitter: every desync attempt
+            // varies its length/delay/split around
+            // the base values, so each attempt
+            // presents a different signature and
+            // DPI cannot just block one fixed
+            // pattern (the fixed pattern is why a
+            // shape worked once and then never
+            // again). The ACTUAL values used are
+            // recorded for the desync test log.
+            fun jitterRange(range: String, pct: Int, minV: Int): String {
+                val parts = range.split("-")
+                val a = parts.getOrNull(0)?.toIntOrNull() ?: return range
+                val b = parts.getOrNull(1)?.toIntOrNull() ?: return range
+                fun j(v: Int): Int {
+                    val d = (v * pct / 100).coerceAtLeast(2)
+                    return (v + java.util.Random().nextInt(d * 2 + 1) - d).coerceAtLeast(minV)
+                }
+                val na = j(a); val nb = j(b)
+                return if (na <= nb) "$na-$nb" else "$nb-$na"
+            }
+            fun jitterInt(v: Int, delta: Int, minV: Int, maxV: Int): Int {
+                return (v + java.util.Random().nextInt(delta * 2 + 1) - delta).coerceIn(minV, maxV)
+            }
+            fun putFragment(packets: String, length: String, delay: String, maxSplit: Int, noiseRand: String = "10-20", noiseDelay: String = "10-16"): Boolean {
                 if (ss == null) return false
                 val security = ss.optString("security", "")
                 if (security != "tls" && security != "reality") return false
@@ -293,8 +343,8 @@ object HydraEngine {
                     put("type", "noise")
                     put("settings", JSONObject().apply {
                         put("noise", JSONArray().put(JSONObject().apply {
-                            put("rand", "10-20")
-                            put("delay", "10-16")
+                            put("rand", noiseRand)
+                            put("delay", noiseDelay)
                         }))
                     })
                 }
@@ -303,6 +353,15 @@ object HydraEngine {
                     put("udp", JSONArray().put(udpNoise))
                 })
                 return true
+            }
+            fun desyncFrag(packets: String, length: String, delay: String, maxSplit: Int, noiseRand: String = "10-20", noiseDelay: String = "10-16", jitter: Boolean = true): Boolean {
+                val security = ss?.optString("security", "") ?: ""
+                val effPackets = if (security == "reality") "1-3" else packets
+                val jl = if (jitter) jitterRange(length, 25, 10) else length
+                val jd = if (jitter) jitterRange(delay, 30, 3) else delay
+                val jm = if (jitter) jitterInt(maxSplit, 2, 1, 25) else maxSplit
+                lastDesyncParams = "packets=$effPackets, len=$jl, delay=$jd, maxSplit=$jm"
+                return putFragment(packets, jl, jd, jm, noiseRand, noiseDelay)
             }
 
             fun putFingerprint(value: String): Boolean {
@@ -324,6 +383,38 @@ object HydraEngine {
                 }
                 Strategy.FRAGMENT_LONG -> {
                     if (!putFragment("tlshello", "100-200", "30-60", 15)) return null
+                }
+                Strategy.DESYNC_CLASSIC -> {
+                    // Exact old FRAGMENT params, no
+                    // jitter: this IS the combination
+                    // that won once before, so it
+                    // must be tried exactly, not
+                    // varied away from the win.
+                    if (!desyncFrag("tlshello", "50-100", "10-20", 10, jitter = false)) return null
+                }
+                Strategy.DESYNC_CLASSIC_LONG -> {
+                    if (!desyncFrag("tlshello", "100-200", "30-60", 15, jitter = false)) return null
+                }
+                Strategy.DESYNC_TINY -> {
+                    if (!desyncFrag("1", "20-40", "5-10", 5)) return null
+                }
+                Strategy.DESYNC_MID -> {
+                    if (!desyncFrag("1-2", "40-80", "8-15", 8)) return null
+                }
+                Strategy.DESYNC_WIDE -> {
+                    if (!desyncFrag("1-5", "80-150", "15-30", 20)) return null
+                }
+                Strategy.DESYNC_SLOW -> {
+                    if (!desyncFrag("tlshello", "50-100", "50-100", 10)) return null
+                }
+                Strategy.DESYNC_NOISE -> {
+                    if (!desyncFrag("tlshello", "50-100", "10-20", 10, "20-40", "5-10")) return null
+                }
+                Strategy.DESYNC_SPLIT2 -> {
+                    if (!desyncFrag("1-3", "30-60", "5-12", 12)) return null
+                }
+                Strategy.DESYNC_LONG2 -> {
+                    if (!desyncFrag("tlshello", "150-250", "20-40", 12)) return null
                 }
                 Strategy.FINGERPRINT -> {
                     if (!putFingerprint("chrome")) return null
@@ -469,7 +560,11 @@ object HydraEngine {
         log(ctx, "منبع انتخاب‌شده: ${sourceLabel(ctx, opts.source)}.",
             "Chosen source: ${sourceLabel(ctx, opts.source)}.")
         when (opts.source) {
-            "v2ray" -> return v2rayEndpoints(ctx).take(opts.maxEndpoints)
+            // ADAPTIVE ENGINE (1.78): alternate-IP
+            // endpoints ahead of each original
+            // (engine-first, originals stay as
+            // fallback). Off = list untouched.
+            "v2ray" -> return AdaptiveEngine.expandHydraEndpoints(ctx, v2rayEndpoints(ctx).take(opts.maxEndpoints))
             "emergency" -> {
                 log(ctx, "در حال گرفتن کانفیگ‌های تازه‌ی اضطراری برای چشیدن…",
                     "Fetching fresh emergency configs for probing…")
@@ -492,7 +587,7 @@ object HydraEngine {
                         "Fetching fresh emergency configs for probing…")
                     out += emergencyEndpoints(ctx)
                 }
-                return out.distinctBy { it.link }.take(opts.maxEndpoints)
+                return AdaptiveEngine.expandHydraEndpoints(ctx, out.distinctBy { it.link }.take(opts.maxEndpoints))
             }
         }
     }
@@ -513,11 +608,11 @@ object HydraEngine {
         try {
             val stop = Intent(ctx, VpnClientService::class.java).apply {
                 action = "STOP"
+                putExtra("stop_gen", VpnClientService.sessionGen)
                 putExtra("hydra_teardown", true)
             }
             ctx.startService(stop)
         } catch (_: Exception) {}
-        try { ctx.stopService(Intent(ctx, VpnClientService::class.java)) } catch (_: Exception) {}
         VpnClientService.isRunning = false
         VpnClientService.currentName = null
     }
@@ -545,6 +640,74 @@ object HydraEngine {
         return VpnClientService.isRunning &&
             (VpnClientService.sessionTag == "hydra" ||
                 (VpnClientService.currentName ?: "").startsWith("هیدرا:"))
+    }
+
+    /** Which VPN is up, in plain words, so the
+     *  "steps aside" message is never a mystery:
+     *  our own session (by tag), a live WireGuard
+     *  tunnel, OpenVPN, or another app's VPN. */
+    fun whichVpnUp(ctx: Context): String? {
+        if (VpnClientService.isRunning) {
+            val tag = VpnClientService.sessionTag
+            return try { VpnClientService.sectionLabel(ctx, tag) } catch (_: Exception) { tag ?: "?" }
+        }
+        try { if (WgDirect.isLive(ctx)) return "WireGuard" } catch (_: Exception) {}
+        try { if (OvpnEngine.isConnected) return "OpenVPN" } catch (_: Exception) {}
+        return try {
+            val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE)
+                as android.net.ConnectivityManager
+            val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+            if (caps?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true)
+                AppLanguage.t(ctx, "یک برنامه‌ی دیگر", "another app")
+            else null
+        } catch (_: Exception) { null }
+    }
+
+    /** The "steps aside" line, with the reason. */
+    fun logHandover(ctx: Context) {
+        val who = whichVpnUp(ctx)
+        if (who != null) {
+            log(ctx, "اتصال «$who» فعال است؛ هیدرا کنار می‌کشد.",
+                "A “$who” connection is active; Hydra steps aside.")
+        } else {
+            log(ctx, "اتصال به یک VPN دیگر واگذار شد؛ هیدرا کنار می‌کشد.",
+                "The connection was handed to another VPN; Hydra steps aside.")
+        }
+    }
+
+    /** Explicit-tap takeover (HydraService.start
+     *  ONLY — never the watchdog or continuous
+     *  re-probes, which still step aside). The
+     *  user tapped connect, so Hydra stops what
+     *  it can stop (our own session, a live
+     *  WireGuard tunnel, OpenVPN), repairs a
+     *  stale WireGuard flag, and waits for the
+     *  tunnels to release — mirroring what
+     *  WireGuard already does to v2ray. Another
+     *  app's VPN cannot be stopped; the probe
+     *  will then step aside WITH the reason. */
+    fun takeoverForExplicitConnect(ctx: Context) {
+        try {
+            if (WgDirect.clearStaleFlag(ctx)) {
+                log(ctx, "حالت وایرگارد قدیمی و بی‌اعتبار بود؛ پاک شد تا جلوی هیدرا را نگیرد.",
+                    "The WireGuard flag was stale; cleared so it no longer blocks Hydra.")
+            }
+        } catch (_: Exception) {}
+        var stopped = false
+        try {
+            if (VpnClientService.isRunning) { stopVpn(ctx); stopped = true }
+        } catch (_: Exception) {}
+        try {
+            if (WgDirect.isLive(ctx)) { WgDirect.disconnectAll(ctx); stopped = true }
+        } catch (_: Exception) {}
+        try {
+            if (OvpnEngine.isConnected) { OvpnEngine.disconnect(); stopped = true }
+        } catch (_: Exception) {}
+        if (stopped) {
+            log(ctx, "اتصال قبلی قطع شد تا هیدرا وصل شود.",
+                "The previous connection was stopped so Hydra can connect.")
+            try { Thread.sleep(800) } catch (_: Exception) {}
+        }
     }
 
     private fun verifyTunnel(ctx: Context, port: Int): Boolean {
@@ -579,6 +742,11 @@ object HydraEngine {
         val base = VpnConfigBuilder.build(ctx, cfg) ?: return AttemptResult.FAILED
         val json = if (strategy == Strategy.PLAIN) base
             else (applyStrategy(base, strategy, host) ?: return AttemptResult.NOT_APPLICABLE)
+        if (isDesyncStrategy(strategy)) {
+            HydraDesyncLog.log(ctx,
+                "امتحان «${endpointLabel(ctx, endpoint)}» با ${strategyLabel(ctx, strategy)}: ${lastDesyncParams ?: ""}",
+                "Trying “${endpointLabel(ctx, endpoint)}” with ${strategyLabel(ctx, strategy)}: ${lastDesyncParams ?: ""}")
+        }
         if (!CoreInit.init(ctx.applicationContext)) return AttemptResult.FAILED
         if (VpnService.prepare(ctx) != null) return AttemptResult.PERMISSION_NEEDED
         // Emergency sessions carry ONLY the generic
@@ -674,8 +842,7 @@ object HydraEngine {
 
     fun probeAndConnect(ctx: Context, opts: Opts, startIndex: Int = 0): Boolean {
         if (anyVpnUp(ctx) && !hydraOwnsVpn()) {
-            log(ctx, "یک VPN دیگر در حال اجراست؛ هیدرا با آن نمی‌جنگد. اول آن را قطع کن.",
-                "Another VPN is running; Hydra will not fight it. Stop that VPN first.")
+            logHandover(ctx)
             return false
         }
         val endpoints = resolveEndpoints(ctx, opts)
@@ -702,7 +869,27 @@ object HydraEngine {
         }
         log(ctx, "چشیدن شروع شد؛ ${endpoints.size} نقطه‌ی اتصال پیدا شد.",
             "Probing started; ${endpoints.size} endpoints found.")
-        val strategies = mutableListOf(Strategy.PLAIN)
+        AppLog.append(ctx, "hydra",
+            "چشیدن شروع شد؛ ${endpoints.size} نقطه‌ی اتصال؛ منبع: ${sourceLabel(ctx, opts.source)}.",
+            "Probing started; ${endpoints.size} endpoints; source: ${sourceLabel(ctx, opts.source)}.")
+        // Desync-first (Hydra-only tick): when the
+        // desync tick is on, desync shapes are the
+        // FIRST attempts, before plain and before
+        // the old fixed fragments. When off, this
+        // list is exactly the old one.
+        val strategies = mutableListOf<Strategy>()
+        if (opts.useDesync) {
+            strategies += Strategy.DESYNC_CLASSIC
+            strategies += Strategy.DESYNC_CLASSIC_LONG
+            strategies += Strategy.DESYNC_TINY
+            strategies += Strategy.DESYNC_MID
+            strategies += Strategy.DESYNC_WIDE
+            strategies += Strategy.DESYNC_SLOW
+            strategies += Strategy.DESYNC_NOISE
+            strategies += Strategy.DESYNC_SPLIT2
+            strategies += Strategy.DESYNC_LONG2
+        }
+        strategies += Strategy.PLAIN
         if (opts.useFragment) {
             strategies += Strategy.FRAGMENT
             strategies += Strategy.FRAGMENT_SPLIT
@@ -718,6 +905,11 @@ object HydraEngine {
             strategies += Strategy.ALPN_H2
             strategies += Strategy.ALPN_HTTP11
             strategies += Strategy.ALPN_NONE
+        }
+        if (opts.useDesync) {
+            HydraDesyncLog.log(ctx,
+                "دی‌سینک هیدرا فعال؛ شکل‌های دی‌سینک اول امتحان می‌شوند (۹ شکل؛ کلاسیک اول، بقیه با پارامتر تصادفی).",
+                "Hydra desync on; desync shapes are tried first (9 shapes; classic first, the rest randomized).")
         }
         // MUX is client-side; WS/GRPC are
         // server-dependent guesses, so they go last.
@@ -798,11 +990,68 @@ object HydraEngine {
                 if (!candidates.contains(pair)) candidates += pair
             }
         }
+        // Desync winner-first: when the desync tick
+        // is on and memory holds a winner, that
+        // EXACT (endpoint, strategy) pair goes to
+        // the very front and the round starts from
+        // it — the old memory only moved the
+        // endpoint, leaving plain first, and the
+        // taste cursor (an index into a list that
+        // TCP ranking reshuffles every round) could
+        // skip the winner entirely. That is why a
+        // shape worked once and then never again.
+        var winnerMoved = false
+        if (opts.useDesync && opts.useMemory) {
+            val winner = lastWinner(ctx)
+            if (winner != null) {
+                val (we, ws) = winner
+                val strat = try { Strategy.valueOf(ws) } catch (_: Exception) { null }
+                if (strat != null) {
+                    val hitIdx = candidates.indexOfFirst { (ep, s) ->
+                        s == strat && (if (we == "emergency") ep.fromEmergency else ep.link == we)
+                    }
+                    if (hitIdx > 0) {
+                        val hit = candidates.removeAt(hitIdx)
+                        candidates.add(0, hit)
+                        winnerMoved = true
+                        HydraDesyncLog.log(ctx,
+                            "حافظه: ترکیب برنده‌ی قبلی اول امتحان می‌شود: «${endpointLabel(ctx, hit.first)}» با ${strategyLabel(ctx, strat)}.",
+                            "Memory: previous winning combination is tried first: “${endpointLabel(ctx, hit.first)}” with ${strategyLabel(ctx, strat)}.")
+                    }
+                }
+            }
+        }
+        // Desync shape-grouping: when the desync
+        // tick is on, try each desync shape for
+        // ALL endpoints before moving to the next
+        // shape (classic for every endpoint first,
+        // then classic-long, then the rest). The
+        // old per-endpoint order buried the known
+        // win for a later endpoint behind dozens
+        // of attempts on earlier endpoints, and
+        // the round budget ran out first. The
+        // winner pair (if any) stays at index 0.
+        if (opts.useDesync) {
+            val desyncOrder = listOf(Strategy.DESYNC_CLASSIC, Strategy.DESYNC_CLASSIC_LONG, Strategy.DESYNC_TINY, Strategy.DESYNC_MID, Strategy.DESYNC_WIDE, Strategy.DESYNC_SLOW, Strategy.DESYNC_NOISE, Strategy.DESYNC_SPLIT2, Strategy.DESYNC_LONG2)
+            val winnerPair = if (winnerMoved) candidates.removeAt(0) else null
+            val desyncPairs = mutableListOf<Pair<Endpoint, Strategy>>()
+            val restPairs = mutableListOf<Pair<Endpoint, Strategy>>()
+            for (pr in candidates) {
+                if (isDesyncStrategy(pr.second)) desyncPairs += pr else restPairs += pr
+            }
+            desyncPairs.sortBy { desyncOrder.indexOf(it.second) }
+            candidates.clear()
+            if (winnerPair != null) candidates += winnerPair
+            candidates += desyncPairs
+            candidates += restPairs
+        }
         val budgetDeadline = System.currentTimeMillis() + opts.budgetSec * 1000L
         // Resume across rounds (see getTasteCursor):
         // endpoints may have changed between rounds,
-        // so clamp the cursor into this list.
-        val start = if (startIndex in candidates.indices) startIndex else 0
+        // so clamp the cursor into this list — but
+        // never past a winner that was just moved
+        // to the front.
+        val start = if (winnerMoved) 0 else if (startIndex in candidates.indices) startIndex else 0
         if (start > 0) log(ctx, "ادامه‌ی چشیدن از ترکیب شماره ${start + 1} از ${candidates.size}.",
             "Resuming probing from combination ${start + 1} of ${candidates.size}.")
         for (idx in start until candidates.size) {
@@ -834,15 +1083,27 @@ object HydraEngine {
                         log(ctx, "وصل شد! شکل برنده برای «$name»: ${strategyLabel(ctx, strategy)}.",
                             "Connected! Winning shape for “$name”: ${strategyLabel(ctx, strategy)}.")
                     }
+
                     saveWinner(ctx, endpoint, strategy)
+                    if (isDesyncStrategy(strategy)) {
+                        HydraDesyncLog.log(ctx,
+                            "وصل شد با ${strategyLabel(ctx, strategy)} برای «$name».",
+                            "Connected with ${strategyLabel(ctx, strategy)} for “$name”.")
+                    }
                     setTasteCursor(ctx, 0)
                     setPhase(ctx, "connected",
                         AppLanguage.t(ctx, "متصل: $name", "Connected: $name"))
+                    AppLog.append(ctx, "hydra",
+                        "«$name» با شکل «${strategyLabel(ctx, strategy)}» وصل شد.",
+                        "“$name” connected with shape “${strategyLabel(ctx, strategy)}”.")
+                    // 2.45: background real-connection check.
+                    ConnVerify.verifyXray(ctx, "hydra", "hydra", name, VpnConfigBuilder.socksPort(ctx)) { VpnClientService.isRunning && VpnClientService.sessionTag == "hydra" }
                     return true
                 }
                 AttemptResult.NOT_APPLICABLE -> {
                     log(ctx, "این شکل برای «$name» معنا ندارد؛ رد می‌شوم.",
                         "This shape does not apply to “$name”; skipping.")
+
                 }
                 AttemptResult.PERMISSION_NEEDED -> {
                     setTasteCursor(ctx, 0)
@@ -853,21 +1114,38 @@ object HydraEngine {
                 AttemptResult.ABORTED -> { setTasteCursor(ctx, 0); return false }
                 AttemptResult.STOLEN -> {
                     setTasteCursor(ctx, 0)
-                    log(ctx, "وسط چشیدن یک VPN دیگر بالا آمد؛ هیدرا کنار می‌کشد.",
-                        "Another VPN came up mid-probe; Hydra steps aside.")
+                    logHandover(ctx)
                     return false
                 }
                 AttemptResult.CORE_FAILED -> {
                     log(ctx, "هسته برای «$name» بالا نیامد؛ شکل بعدی.",
                         "The core did not come up for “$name”; next shape.")
+                    if (isDesyncStrategy(strategy)) {
+                        HydraDesyncLog.log(ctx,
+                            "«${strategyLabel(ctx, strategy)}» برای «$name»: هسته بالا نیامد.",
+                            "“${strategyLabel(ctx, strategy)}” for “$name”: the core did not come up.")
+                    }
+
                 }
                 AttemptResult.TUNNEL_FAILED -> {
                     log(ctx, "«$name» وصل شد ولی تونلش جواب نداد؛ شکل بعدی.",
                         "“$name” connected but its tunnel did not respond; next shape.")
+                    if (isDesyncStrategy(strategy)) {
+                        HydraDesyncLog.log(ctx,
+                            "«${strategyLabel(ctx, strategy)}» برای «$name» وصل شد ولی تونلش جواب نداد.",
+                            "“${strategyLabel(ctx, strategy)}” connected for “$name” but its tunnel did not respond.")
+                    }
+
                 }
                 AttemptResult.FAILED -> {
                     log(ctx, "این ترکیب جواب نداد؛ شکل بعدی.",
                         "This combination did not work; next shape.")
+                    if (isDesyncStrategy(strategy)) {
+                        HydraDesyncLog.log(ctx,
+                            "«${strategyLabel(ctx, strategy)}» برای «$name» جواب نداد.",
+                            "“${strategyLabel(ctx, strategy)}” did not work for “$name”.")
+                    }
+
                 }
             }
         }
@@ -876,6 +1154,9 @@ object HydraEngine {
             "All shapes were tried and none connected.")
         setPhase(ctx, "failed",
             AppLanguage.t(ctx, "هیچ شکلی جواب نداد", "No shape worked"))
+        AppLog.append(ctx, "hydra",
+            "همه‌ی شکل‌ها امتحان شد و هیچ‌کدام وصل نشد.",
+            "All shapes were tried and none connected.")
         return false
     }
 }

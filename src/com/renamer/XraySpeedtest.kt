@@ -85,7 +85,7 @@ object XraySpeedtest {
     fun isSimpleType(cfg: String): Boolean {
         return cfg.startsWith("vless://") || cfg.startsWith("vmess://") ||
             cfg.startsWith("trojan://") || cfg.startsWith("ss://") ||
-            cfg.startsWith("socks://") || cfg.startsWith("socks5://") ||
+            cfg.startsWith("socks://") || cfg.startsWith("socks5://") || cfg.startsWith("socks4://") ||
             cfg.startsWith("http://")
     }
 
@@ -327,9 +327,73 @@ object XraySpeedtest {
         }
     }
 
+    /** Full type exactly like v2rayNG's server list
+     *  (MainServerRowModels.serverProtocolDescription):
+     *  PROTOCOL / network / security, joined with " / ",
+     *  protocol ALL CAPS, network/security lowercase, tcp
+     *  omitted, security kept only when tls or reality,
+     *  insecure TLS shown as "tls insecure". Examples:
+     *  VLESS / ws / tls, VMESS / grpc / tls, TROJAN / tls,
+     *  SHADOWSOCKS, VLESS / ws, VLESS / ws / reality,
+     *  HYSTERIA2 / hysteria / tls, WIREGUARD, SOCKS, HTTP,
+     *  CUSTOM. (The user's quoted "Vless/tls/ws" does not
+     *  match this checkout's format — order, casing and
+     *  separator all differ — so this follows the source.) */
+    fun fullType(cfg: String): String {
+        if (isCustom(cfg)) return "CUSTOM"
+        if (isGroup(cfg)) return "GROUP"
+        if (isChain(cfg)) return "CHAIN"
+        val scheme = cfg.substringBefore("://").lowercase()
+        val proto = when (scheme) {
+            "vless" -> "VLESS"
+            "vmess" -> "VMESS"
+            "trojan" -> "TROJAN"
+            "ss" -> "SHADOWSOCKS"
+            "socks", "socks5", "socks4" -> "SOCKS"
+            "http" -> "HTTP"
+            "wireguard" -> "WIREGUARD"
+            "hysteria2", "hy2" -> "HYSTERIA2"
+            "hysteria" -> "HYSTERIA"
+            "tuic" -> "TUIC"
+            else -> scheme.uppercase()
+        }
+        var net = ""
+        var sec = ""
+        var insecure = false
+        try {
+            when {
+                cfg.startsWith("vmess://") -> {
+                    var raw = cfg.removePrefix("vmess://").substringBefore("#").trim()
+                    while (raw.length % 4 != 0) raw += "="
+                    val j = org.json.JSONObject(String(android.util.Base64.decode(raw, android.util.Base64.URL_SAFE), Charsets.UTF_8))
+                    net = j.optString("net", "tcp")
+                    sec = j.optString("tls", "")
+                }
+                cfg.startsWith("vless://") || cfg.startsWith("trojan://") -> {
+                    val p = parseProxy(cfg)
+                    net = p.params["type"] ?: "tcp"
+                    sec = if (scheme == "trojan") (p.params["security"] ?: "tls") else (p.params["security"] ?: "")
+                    insecure = p.params["insecure"] == "1" || p.params["insecure"].equals("true", ignoreCase = true) ||
+                        p.params["allowInsecure"] == "1" || p.params["allow_insecure"] == "1"
+                }
+                cfg.startsWith("hysteria2://") || cfg.startsWith("hy2://") -> {
+                    val p = parseProxy(cfg)
+                    net = "hysteria"
+                    sec = p.params["security"] ?: "tls"
+                }
+            }
+        } catch (_: Exception) {}
+        if (sec != "tls" && sec != "reality") sec = ""
+        val parts = mutableListOf(proto)
+        if (net.isNotBlank() && !net.equals("tcp", ignoreCase = true)) parts.add(net.lowercase())
+        if (sec.isNotBlank()) parts.add(if (insecure && sec == "tls") "tls insecure" else sec.lowercase())
+        return parts.joinToString(" / ")
+    }
+
     /** Speedtest Xray config for one profile, as v2rayNG builds it. */
     fun buildSpeedtestConfig(cfg: String): String? {
         val outbounds = try { outboundsFor(cfg) } catch (_: Exception) { return null } ?: return null
+
         outbounds.put(JSONObject().apply { put("protocol", "freedom"); put("tag", "direct") })
         outbounds.put(JSONObject().apply { put("protocol", "blackhole"); put("tag", "block") })
         return JSONObject().apply {
@@ -356,7 +420,9 @@ object XraySpeedtest {
             server = uri.host ?: "",
             port = if (uri.port != -1) uri.port else 443,
             id = userInfo.substringBefore(":").ifBlank { userInfo },
-            password = userInfo.substringAfter(":", ""),
+            // a userinfo with no ":" carries the password
+            // itself (standard Trojan links) — it must not become empty.
+            password = if (userInfo.contains(":")) userInfo.substringAfter(":") else userInfo,
             params = params,
             path = uri.path ?: ""
         )
@@ -393,7 +459,8 @@ object XraySpeedtest {
         }
         if (net == "ws") {
             s.put("wsSettings", JSONObject().apply {
-                put("path", p.params["path"] ?: "/")
+                // prefer the query path, else the link's own URI path, else "/".
+                put("path", p.params["path"]?.takeIf { it.isNotBlank() } ?: p.path.ifBlank { "/" })
                 if (p.params["host"] != null) put("headers", JSONObject().apply {
                     put("Host", p.params["host"])
                 })
@@ -427,7 +494,7 @@ object XraySpeedtest {
                     })
                 }
             }
-            cfg.startsWith("socks://") || cfg.startsWith("socks5://") -> {
+            cfg.startsWith("socks://") || cfg.startsWith("socks5://") || cfg.startsWith("socks4://") -> {
                 val p = parseProxy(cfg)
                 JSONObject().apply {
                     put("protocol", "socks"); put("tag", "proxy")
@@ -474,6 +541,16 @@ object XraySpeedtest {
                         if (tls == "tls") {
                             put("tlsSettings", JSONObject().apply {
                                 if (j.optString("sni").isNotBlank()) put("serverName", j.optString("sni"))
+                            })
+                        }
+                        if (tls == "reality") {
+                            put("realitySettings", JSONObject().apply {
+                                put("show", false)
+                                put("fingerprint", j.optString("fp").ifBlank { "chrome" })
+                                if (j.optString("sni").isNotBlank()) put("serverName", j.optString("sni"))
+                                if (j.optString("pbk").isNotBlank()) put("publicKey", j.optString("pbk"))
+                                put("shortId", j.optString("sid", ""))
+                                put("spiderX", j.optString("spx", ""))
                             })
                         }
                     }

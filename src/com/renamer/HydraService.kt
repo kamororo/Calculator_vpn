@@ -25,7 +25,15 @@ class HydraService : Service() {
 
         @Volatile var running = false
 
-        fun start(ctx: Context) {
+        fun start(ctx: Context, takeover: Boolean = true) {
+            // Explicit tap only: take over first
+            // (see HydraEngine.takeoverForExplicitConnect).
+            // Smart Connect passes takeover=false:
+            // it must never disturb a hand-started
+            // VPN, and it already ensured none is up.
+            if (takeover) {
+                try { HydraEngine.takeoverForExplicitConnect(ctx) } catch (_: Exception) {}
+            }
             val intent = Intent(ctx, HydraService::class.java).apply { action = ACTION_START }
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -120,8 +128,7 @@ class HydraService : Service() {
         var round = 0
         while (HydraEngine.isActive(ctx)) {
             if (HydraEngine.anyVpnUp(ctx) && !HydraEngine.hydraOwnsVpn()) {
-                HydraEngine.log(ctx, "اتصال به یک VPN دیگر واگذار شد؛ هیدرا کنار می‌کشد.",
-                    "The connection was handed to another VPN; Hydra steps aside.")
+                HydraEngine.logHandover(ctx)
                 return false
             }
             if (VpnService.prepare(ctx) != null) {
@@ -132,11 +139,10 @@ class HydraService : Service() {
             if (round > 1) HydraEngine.log(ctx, "دور $round چشیدن…",
                 "Probing round $round…")
             val optsNow = HydraEngine.loadOpts(ctx)
-            if (HydraEngine.probeAndConnect(ctx, optsNow, HydraEngine.getTasteCursor(ctx))) return true
+            if (HydraEngine.probeAndConnect(ctx, optsNow, if (round == 1 && optsNow.useDesync) 0 else HydraEngine.getTasteCursor(ctx))) return true
             if (!HydraEngine.isActive(ctx)) return false
             if (HydraEngine.anyVpnUp(ctx) && !HydraEngine.hydraOwnsVpn()) {
-                HydraEngine.log(ctx, "اتصال به یک VPN دیگر واگذار شد؛ هیدرا کنار می‌کشد.",
-                    "The connection was handed to another VPN; Hydra steps aside.")
+                HydraEngine.logHandover(ctx)
                 return false
             }
             if (!optsNow.continuous) return false
@@ -181,15 +187,13 @@ class HydraService : Service() {
             if (!HydraEngine.isActive(ctx)) return
             if (!VpnClientService.isRunning) {
                 if (!HydraEngine.hydraOwnsVpn() && HydraEngine.anyVpnUp(ctx)) {
-                    HydraEngine.log(ctx, "اتصال به یک VPN دیگر واگذار شد؛ هیدرا کنار می‌کشد.",
-                        "The connection was handed to another VPN; Hydra steps aside.")
+                    HydraEngine.logHandover(ctx)
                     return
                 }
                 HydraEngine.log(ctx, "اتصال قطع شد؛ دوباره می‌چشم و وصل می‌شوم.",
                     "Connection lost; re-probing and reconnecting.")
                 if (HydraEngine.anyVpnUp(ctx) && !HydraEngine.hydraOwnsVpn()) {
-                    HydraEngine.log(ctx, "اتصال به یک VPN دیگر واگذار شد؛ هیدرا کنار می‌کشد.",
-                        "The connection was handed to another VPN; Hydra steps aside.")
+                    HydraEngine.logHandover(ctx)
                     return
                 }
                 HydraEngine.setPhase(ctx, "probing",
@@ -199,8 +203,7 @@ class HydraService : Service() {
                 continue
             }
             if (!HydraEngine.hydraOwnsVpn()) {
-                HydraEngine.log(ctx, "اتصال به یک VPN دیگر واگذار شد؛ هیدرا کنار می‌کشد.",
-                    "The connection was handed to another VPN; Hydra steps aside.")
+                HydraEngine.logHandover(ctx)
                 return
             }
             // Tunnel health check every tick (20s):

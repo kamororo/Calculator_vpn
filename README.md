@@ -1,8 +1,7 @@
 # تغییر نام کانفیگ (Config Renamer)
 
 «تغییر نام کانفیگ» ابزاری برای تغییر نام گروهی کانفیگ‌های v2ray است که
-به‌مرور بخش‌های اتصال هم به آن اضافه شده: v2ray، WireGuard، OpenVPN،
-اتصال اضطراری، اتصال هوشمند، زنجیره‌ی دوتایی و هیدرا. صفحه‌ی قفل برنامه
+به‌مرور بخش‌های اتصال هم به آن اضافه شده: v2ray، WireGuard، OpenVPN، اتصال اضطراری، اتصال هوشمند، زنجیره‌ی دوتایی، هیدرا، پنل Cloudflare و پیام‌رسانی زبان ناشناس. صفحه‌ی قفل برنامه
 به شکل یک ماشین‌حساب درآمده و بخش خصوصی با پین باز می‌شود.
 
 > **هشدار امنیتی برای سازنده‌ی بیلد:** پین‌ها و رمزهایی که در کد
@@ -12,6 +11,8 @@
 > - پین خصوصی و عمومی در `src/com/renamer/PinActivity.kt`
 > - رمز ورود کلی در `src/com/renamer/AppLock.kt`
 > - رمز تنظیمات اضطراری در `src/com/renamer/EmergencyActivity.kt`
+- رمز پنل Cloudflare در `src/com/renamer/CloudflareActivity.kt`
+- آدرس هاست پیام‌رسانی در `src/com/renamer/ShzClient.kt` (‏HOST و LEGACY_HOST)
 >
 > لینک سابسکریبشن اضطراری پیش‌فرض، لینک واقعی خود برنامه است و عمداً
 > نگه داشته شده تا بخش اضطراری بدون هیچ تنظیم اضافه‌ای کار کند. اگر
@@ -71,6 +72,7 @@ WORKSPACE=/home/user/workspace bash build.sh
 | `zxing-core.jar` | ZXing (کتابخانه‌ی بارکد) | Apache-2.0 |
 | `wg-tunnel-stripped.jar` | کتابخانه‌ی تونل WireGuard اندروید | MIT |
 | `jsch-0.1.55.jar` | JSch (پیاده‌سازی SSH) | BSD |
+| `awg-tunnel.jar` | کتابخانه‌ی تونل AmneziaWG (‏org.amnezia.awg‏) | GPL-3.0 |
 | `androidx-collection-stub.jar` | استاب مجموعه‌های AndroidX | Apache-2.0 |
 | `ovpn_deps/annotation-jvm-1.8.0.jar` | آنوتیشن‌های JetBrains | Apache-2.0 |
 | `ovpn_deps/classes.jar` | کلاس‌های کامپایل‌شده‌ی ics-openvpn | GPL-3.0 |
@@ -96,7 +98,7 @@ WORKSPACE=/home/user/workspace bash build.sh
 
 ## نسخه
 
-این ریپو بر مبنای نسخه‌ی ۱٫۶۲ (versionCode 63) آماده شده است.
+این ریپو بر مبنای نسخه‌ی ۲٫۶۳ (versionCode 179) آماده شده است.
 
 ## لایسنس
 
@@ -110,13 +112,15 @@ GPL-3.0 است.
 
 Config Renamer renames v2ray configs in bulk and also includes
 connection sections: v2ray, WireGuard, OpenVPN, emergency connect,
-smart connect, double chain and Hydra. Its lock screen looks like a
+smart connect, double chain, Hydra, Cloudflare panel and alien-language
+messenger. Its lock screen looks like a
 calculator and the private section opens with a PIN.
 
 Build with `bash build.sh` (see the Persian section above for
-prerequisites and environment variables). The PINs, passwords and the
-default emergency subscription URL in the code are placeholders —
-change them before distributing your own build, and never commit a
-release keystore to a public repository.
+prerequisites and environment variables). The PINs, passwords and paste host in the code are sample values —
+change them before distributing your own build; the default emergency
+subscription URL is the app's real one, kept intentionally so emergency
+works out of the box. Never commit a release keystore to a public
+repository.
 
 License: GPL-3.0 (see `LICENSE`).
