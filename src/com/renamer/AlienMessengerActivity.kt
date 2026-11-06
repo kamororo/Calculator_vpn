@@ -62,6 +62,58 @@ import java.util.Locale
  *  never appears anywhere. */
 class AlienMessengerActivity : Activity() {
     private fun L(fa: String, en: String) = AppLanguage.t(this, fa, en)
+
+    // ---------- E2E (2.64) ----------
+    // Automatic AES-GCM per-chat encryption. The key lives in the
+    // shared link's fragment (never sent to the server); the host
+    // stores ciphertext only. Display sites decrypt; storage paths
+    // keep the stored (ciphertext) form.
+
+    /** This chat's own E2E key, generating it when needed.
+     *  atSetup=true only while the chat is still being set up (the
+     *  partner has not received any link yet). */
+    private fun e2eKey(c: AlienChat, atSetup: Boolean): ByteArray? =
+        AlienE2e.getOrCreateKey(this, c.id, atSetup)
+
+    /** Display text for a stored message line. */
+    private fun dispStored(stored: String, mine: Boolean): String {
+        val c = chat ?: return AlienChats.parseReply(stored).second
+        return AlienE2e.displayStored(this, c.id, stored, mine)
+    }
+
+    /** Encrypt one message's inner text with this chat's own key
+     *  (plain text when no key is available — legacy fallback). */
+    private fun encText(c: AlienChat, text: String): String {
+        val key = e2eKey(c, atSetup = false)
+        return AlienE2e.encryptText(key, text)
+    }
+
+    /** The share link for this chat, with the E2E key in its
+     *  fragment (2.64). */
+    private fun shareLinkFor(c: AlienChat, atSetup: Boolean): String {
+        val key = e2eKey(c, atSetup)
+        return AlienE2e.linkWithKey(c.ownView, key)
+    }
+
+    /** One-time hint after the first encrypted send in a chat whose
+     *  partner still holds the old (key-less) link. */
+    private fun maybeShowE2eHint(c: AlienChat) {
+        if (c.partnerView.isBlank()) return
+        if (AlienE2e.wasKeyAtSetup(this, c.id)) return
+        if (AlienE2e.hintShown(this, c.id)) return
+        AlienE2e.markHintShown(this, c.id)
+        toast(L("پیام‌ها از حالا رمزنگاری می‌شوند؛ لینک گفتگو را یک بار دیگر به دوستت بده تا پیام‌های تازه را بخواند",
+            "Messages are now encrypted; give the chat link to your friend once more so they can read the new messages"))
+    }
+
+    /** One-time note when the Keystore is unavailable, so the user
+     *  is not silently left on the old (unencrypted) behaviour. */
+    private fun maybeShowE2eFailHint(c: AlienChat) {
+        if (AlienE2e.failHintShown(this, c.id)) return
+        AlienE2e.markFailHintShown(this, c.id)
+        toast(L("رمزنگاری خودکار در این گوشی در دسترس نیست؛ پیام‌ها مثل قبل ارسال می‌شوند",
+            "Automatic encryption is not available on this phone; messages are sent as before"))
+    }
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     private var mode = "list"
@@ -414,7 +466,12 @@ class AlienMessengerActivity : Activity() {
             card.addView(nameRow)
             card.addView(TextView(this).apply {
                 text = if (c.lastPreview.isBlank()) L("هنوز پیامی نیست", "No messages yet")
-                    else c.lastPreview
+                    else {
+                        // 2.64: decrypt the preview (stored form),
+                        // then truncate for display.
+                        val pv = AlienE2e.displayPreview(this@AlienMessengerActivity, c.id, c.lastPreview)
+                        if (pv.length > 40) pv.substring(0, 40) + "…" else pv
+                    }
                 textSize = 12f
                 setTextColor(Color.GRAY)
                 maxLines = 1
@@ -557,7 +614,7 @@ class AlienMessengerActivity : Activity() {
         }
         root.addView(giveLabel)
         val giveBox = TextView(this).apply {
-            text = if (c.ownView.isBlank()) "" else AlienSub.displayForm(c.ownView)
+            text = if (c.ownView.isBlank()) "" else AlienSub.displayForm(shareLinkFor(c, atSetup = true))
             textSize = 14f
             setTextColor(Color.parseColor("#1A1A1A"))
             background = HydraUi.glassBg(Color.parseColor("#FFFFFF"), Color.parseColor("#E0E0E0"), 16f, this@AlienMessengerActivity)
@@ -583,7 +640,7 @@ class AlienMessengerActivity : Activity() {
             giveLabel.visibility = vis
             giveBox.visibility = vis
             giveCopy.visibility = vis
-            giveBox.text = if (cc.ownView.isBlank()) "" else AlienSub.displayForm(cc.ownView)
+            giveBox.text = if (cc.ownView.isBlank()) "" else AlienSub.displayForm(shareLinkFor(cc, atSetup = true))
         }
 
         // a fresh link first asks (the old
@@ -681,6 +738,10 @@ class AlienMessengerActivity : Activity() {
                 return@setOnClickListener
             }
             cc.partnerView = split.first
+            // 2.64: the partner's link may carry their E2E key in
+            // its fragment — store it so their messages decrypt.
+            val partnerKey = AlienChats.splitEnteredKey(entered)
+            if (partnerKey != null) AlienE2e.storePartnerKey(this, cc.id, partnerKey)
             AlienChats.update(this, cc)
             chat = cc
             if (cc.myName.isBlank()) {
@@ -984,14 +1045,14 @@ class AlienMessengerActivity : Activity() {
         runOnUiThread {
             val c = chat ?: return@runOnUiThread
             if (c.ownView.isBlank()) return@runOnUiThread
-            ownLinkBox?.text = AlienSub.displayForm(c.ownView)
+            ownLinkBox?.text = AlienSub.displayForm(shareLinkFor(c, atSetup = false))
             ownLinkRow?.visibility = View.VISIBLE
             if (copy) copyText(ownLinkBox?.text.toString())
         }
     }
 
     private fun enterReplyMode(row: ChatRow) {
-        val (_, display) = AlienChats.parseReply(row.text)
+        val display = dispStored(row.text, row.mine)
         replyToTs = row.ts
         val who = if (row.mine) {
             L("شما", "You")
@@ -1019,7 +1080,14 @@ class AlienMessengerActivity : Activity() {
         val replyTo = replyToTs
         cancelReply()
         val ts = System.currentTimeMillis()
-        val stored = if (replyTo != null) "R$replyTo|$text" else text
+        // 2.64: the message text is encrypted with this chat's own
+        // key before it ever leaves the device; the host stores
+        // ciphertext only. The reply prefix stays outside the
+        // ciphertext, so replies keep working.
+        val e2eKeyNow = e2eKey(c, atSetup = false)
+        if (e2eKeyNow == null) maybeShowE2eFailHint(c)
+        val enc = AlienE2e.encryptText(e2eKeyNow, text)
+        val stored = if (replyTo != null) "R$replyTo|$enc" else enc
         Thread {
             // the whole send is one locked
             // unit: read, expiry-create, build,
@@ -1061,6 +1129,9 @@ class AlienMessengerActivity : Activity() {
             val next = if (content.isNullOrBlank()) line else content.trimEnd() + "\n" + line
             val ok = ShzClient.updateForMode(AlienSub.sendMode(this), c.ownManage, next)
             runOnUiThread {
+                // 2.64: once, tell the sender the partner needs the
+                // fresh link to read the new encrypted messages.
+                maybeShowE2eHint(c)
                 if (!ok) {
                     OfflineQueue.add(this, OfflineQueue.Item(c.id, ts, stored))
                     toast(L("اینترنت نیست؛ پیام در صف ماند تا بعد فرستاده شود",
@@ -1239,7 +1310,9 @@ class AlienMessengerActivity : Activity() {
     }
 
     private fun editMessageDialog(row: ChatRow) {
-        val (_, display) = AlienChats.parseReply(row.text)
+        // 2.64: the dialog shows the decrypted text, never the
+        // ciphertext.
+        val display = dispStored(row.text, row.mine)
         val input = EditText(this).apply {
             setText(display)
             textSize = 15f
@@ -1252,7 +1325,10 @@ class AlienMessengerActivity : Activity() {
                 if (newText.isBlank()) return@setPositiveButton
                 if (row.pending) {
                     val (replyTo, _) = AlienChats.parseReply(row.text)
-                    val newStored = if (replyTo != null) "R$replyTo|$newText" else newText
+                    // 2.64: the edited text is encrypted the same
+                    // way as a fresh send.
+                    val encNew = chat?.let { encText(it, newText) } ?: newText
+                    val newStored = if (replyTo != null) "R$replyTo|$encNew" else encNew
                     OfflineQueue.updateText(this, chat?.id ?: return@setPositiveButton, row.ts, newStored)
                     refreshChat()
                 } else {
@@ -1279,7 +1355,10 @@ class AlienMessengerActivity : Activity() {
                     val orig = parsed.messages.firstOrNull { it.first == row.ts }
                     if (orig != null) {
                         val (replyTo, _) = AlienChats.parseReply(orig.second)
-                        val newStored = if (replyTo != null) "R$replyTo|$newDisplay" else newDisplay
+                        // 2.64: the edited text is encrypted the
+                        // same way as a fresh send.
+                        val encNew = AlienE2e.encryptText(AlienE2e.getOrCreateKey(this, c.id, atSetup = false), newDisplay)
+                        val newStored = if (replyTo != null) "R$replyTo|$encNew" else encNew
                         val lines = parsed.messages.map { m ->
                             if (m.first == row.ts) AlienChats.msgLine(m.first, newStored)
                             else AlienChats.msgLine(m.first, m.second)
@@ -1508,9 +1587,12 @@ class AlienMessengerActivity : Activity() {
                 }
                 if (latest != null && latest.ts != cc.lastTs) {
                     cc.lastTs = latest.ts
-                    val latestDisplay = AlienChats.parseReply(latest.text).second
-                    cc.lastPreview = if (latestDisplay.length > 40)
-                        latestDisplay.substring(0, 40) + "…" else latestDisplay
+                    // 2.64: the preview stores the STORED form
+                    // (ciphertext for encrypted messages) with an
+                    // owner marker, untruncated — truncation happens
+                    // after decryption, at display time.
+                    val latestStored = AlienChats.parseReply(latest.text).second
+                    cc.lastPreview = AlienE2e.previewWithOwner(latestStored, latest.mine)
                     changed = true
                 }
                 if (changed) AlienChats.update(this, cc)
@@ -1558,7 +1640,10 @@ class AlienMessengerActivity : Activity() {
 
     private fun bubble(row: ChatRow, all: List<ChatRow>, time: String): LinearLayout {
         val mine = row.mine
-        val (replyTo, display) = AlienChats.parseReply(row.text)
+        val (replyTo, _) = AlienChats.parseReply(row.text)
+        // 2.64: decrypt at display time only; the stored form stays
+        // ciphertext everywhere else.
+        val display = dispStored(row.text, row.mine)
         val wrap = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = if (mine) Gravity.END else Gravity.START
@@ -1586,7 +1671,7 @@ class AlienMessengerActivity : Activity() {
             val previewText = if (orig == null) {
                 L("پیام اصلی حذف شده است", "Original message was deleted")
             } else {
-                val origDisplay = AlienChats.parseReply(orig.text).second
+                val origDisplay = dispStored(orig.text, orig.mine)
                 val who = if (orig.mine) {
                     L("شما", "You")
                 } else if (chat?.partnerName.isNullOrBlank()) {

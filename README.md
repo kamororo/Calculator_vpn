@@ -98,7 +98,7 @@ WORKSPACE=/home/user/workspace bash build.sh
 
 ## نسخه
 
-این ریپو بر مبنای نسخه‌ی ۲٫۶۳ (versionCode 179) آماده شده است.
+این ریپو بر مبنای نسخه‌ی ۲٫۶۸ (versionCode 184) آماده شده است.
 
 ## لایسنس
 

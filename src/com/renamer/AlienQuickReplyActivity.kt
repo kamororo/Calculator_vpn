@@ -317,18 +317,21 @@ class AlienQuickReplyActivity : Activity() {
                 val partnerSeen = partner.seenTs
                 val merged = mutableListOf<Row>()
                 for ((ts, second) in own.messages) {
-                    val (replyTo, text) = AlienChats.parseReply(second)
+                    val (replyTo, _) = AlienChats.parseReply(second)
+                    // 2.64: decrypt at display time (E2E).
+                    val text = AlienE2e.displayStored(this, chatId, second, mine = true)
                     merged += Row(ts, true, text, replyTo, false,
                         partnerSeen != null && ts <= partnerSeen)
                 }
                 for ((ts, second) in partner.messages) {
                     if (ts <= c.myClearTs) continue
-                    val (replyTo, text) = AlienChats.parseReply(second)
+                    val (replyTo, _) = AlienChats.parseReply(second)
+                    val text = AlienE2e.displayStored(this, chatId, second, mine = false)
                     merged += Row(ts, false, text, replyTo, false, false)
                 }
                 for (item in OfflineQueue.listFor(this, chatId)) {
                     if (merged.none { it.ts == item.ts && it.mine }) {
-                        merged += Row(item.ts, true, item.text, null, true, false)
+                        merged += Row(item.ts, true, AlienE2e.displayStored(this, chatId, item.text, mine = true), null, true, false)
                     }
                 }
                 merged.sortBy { it.ts }
@@ -503,7 +506,11 @@ class AlienQuickReplyActivity : Activity() {
                 val newText = field.text.toString().trim()
                 if (newText.isBlank() || newText == row.text) return@setPositiveButton
                 if (row.pending) {
-                    OfflineQueue.updateText(this, chatId, row.ts, newText)
+                    // 2.64: the queue stores the stored (encrypted)
+                    // form, like a fresh send.
+                    val encNew = AlienE2e.encryptText(AlienE2e.getOrCreateKey(this, chatId, atSetup = false), newText)
+                    val storedNew = if (row.replyTo != null) "R${row.replyTo}|$encNew" else encNew
+                    OfflineQueue.updateText(this, chatId, row.ts, storedNew)
                     loadMessages()
                     return@setPositiveButton
                 }
@@ -511,7 +518,10 @@ class AlienQuickReplyActivity : Activity() {
                 Thread {
                     try {
                         val own = AlienChats.parseSub(ShzClient.fetchAny(c.ownView))
-                        val second = if (row.replyTo != null) "R${row.replyTo}|$newText" else newText
+                        // 2.64: encrypt the edited text the same
+                        // way as a fresh send.
+                        val encNew = AlienE2e.encryptText(AlienE2e.getOrCreateKey(this, c.id, atSetup = false), newText)
+                        val second = if (row.replyTo != null) "R${row.replyTo}|$encNew" else encNew
                         val kept = own.messages.map {
                             if (it.first == row.ts) AlienChats.msgLine(it.first, second)
                             else AlienChats.msgLine(it.first, it.second)
@@ -640,13 +650,17 @@ class AlienQuickReplyActivity : Activity() {
         sendBtn.isEnabled = false
         val ts = System.currentTimeMillis()
         val replyTo = replyToTs
+        // 2.64: encrypt with this chat's own key before the message
+        // leaves the device; the queue stores the stored form.
+        val enc = AlienE2e.encryptText(AlienE2e.getOrCreateKey(this, c.id, atSetup = false), text)
+        val stored = if (replyTo != null) "R$replyTo|$enc" else enc
         Thread {
             try {
                 var content = ShzClient.fetchAny(c.ownView)
                 if (content == null) {
                     val created = ShzClient.createForMode(AlienSub.sendMode(this), "")
                     if (created == null) {
-                        OfflineQueue.add(this, OfflineQueue.Item(chatId, ts, text))
+                        OfflineQueue.add(this, OfflineQueue.Item(chatId, ts, stored))
                         runOnUiThread {
                             Toast.makeText(this, L("اینترنت نیست؛ پیام در صف ماند تا بعد فرستاده شود",
                                 "No connection; the message is queued and will be sent later"),
@@ -671,14 +685,13 @@ class AlienQuickReplyActivity : Activity() {
                 }
                 val own = AlienChats.parseSub(content)
                 val lines = own.messages.map { AlienChats.msgLine(it.first, it.second) }.toMutableList()
-                lines += if (replyTo != null) AlienChats.msgLineReply(ts, replyTo, text)
-                    else AlienChats.msgLine(ts, text)
+                lines += AlienChats.msgLine(ts, stored)
                 val next = AlienChats.buildOwnContent(
                     c.myName, c.myClearTs, c.blockedByMe, lines, own.seenTs ?: 0L)
                 val ok = ShzClient.updateForMode(AlienSub.sendMode(this), c.ownManage, next)
                 runOnUiThread {
                     if (!ok) {
-                        OfflineQueue.add(this, OfflineQueue.Item(chatId, ts, text))
+                        OfflineQueue.add(this, OfflineQueue.Item(chatId, ts, stored))
                         Toast.makeText(this, L("اینترنت نیست؛ پیام در صف ماند تا بعد فرستاده شود",
                             "No connection; the message is queued and will be sent later"),
                             Toast.LENGTH_SHORT).show()

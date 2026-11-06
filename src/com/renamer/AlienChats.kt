@@ -381,7 +381,11 @@ object AlienChats {
      *  text is not a message link at all. */
     fun splitEntered(alienText: String): Pair<String, String>? {
         val raw = AlienSub.parseInput(alienText) ?: return null
-        val parts = ShzClient.splitBundle(raw)
+        // 2.64: the partner's link may carry the E2E key in its
+        // fragment ("#k=..."). The key is extracted separately by
+        // splitEnteredKey; the stored view/manage links stay clean.
+        val clean = AlienE2e.stripKeyFragment(raw)
+        val parts = ShzClient.splitBundle(clean)
         if (parts.isEmpty()) return null
         val views = parts.map { part ->
             val he = ShzClient.hostEnd(part)
@@ -396,6 +400,11 @@ object AlienChats {
         }
         return views.joinToString("|") to manages.joinToString("|")
     }
+
+    /** Extract the E2E key carried in a partner link's fragment, or
+     *  null when the link carries none (pre-2.64 link). */
+    fun splitEnteredKey(alienText: String): ByteArray? =
+        AlienE2e.keyFromAlien(alienText)
 }
 
 

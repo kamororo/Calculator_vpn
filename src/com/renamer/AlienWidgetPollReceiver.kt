@@ -122,7 +122,8 @@ class AlienWidgetPollReceiver : BroadcastReceiver() {
                     if (maxTs > last) {
                         prefs.edit().putLong("poll_last_$chatId", maxTs).apply()
                         val text = fresh.firstOrNull { it.first == maxTs }?.second
-                            ?.let { AlienChats.parseReply(it).second } ?: ""
+                            // 2.64: decrypt at display time (E2E).
+                            ?.let { AlienE2e.displayStored(ctx, chatId, it, mine = false) } ?: ""
                         notify(ctx, chatId.hashCode(), chatId,
                             c.partnerName.ifBlank {
                                 AppLanguage.t(ctx, "گفتگو", "Chat")

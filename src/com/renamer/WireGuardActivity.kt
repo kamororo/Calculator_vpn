@@ -165,6 +165,57 @@ class WireGuardActivity : Activity() {
     private fun L(fa: String, en: String): String = AppLanguage.t(this, fa, en)
     private fun prefs() = getSharedPreferences("renamer_wg", MODE_PRIVATE)
 
+    /** 2.67: WARP removal — one-time upgrade cleanup.
+     *  Deletes ONLY the tunnel the free-WARP feature
+     *  itself created (named "WARP" with a Cloudflare
+     *  WARP endpoint), the feature's stored identity
+     *  prefs, the engine's stored WARP account, and
+     *  the WARP TUN prefs file. A hand-made tunnel
+     *  merely named "WARP" (different endpoint) is
+     *  left alone. Idempotent: a second run finds
+     *  nothing to delete. */
+    private fun removeWarpRemnants() {
+        try {
+            val sp = prefs()
+            val raw = sp.getString("wg_list", "[]") ?: "[]"
+            val arr = JSONArray(raw)
+            var changed = false
+            val out = JSONArray()
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                if (o.optString("name", "") == "WARP" && isWarpBuiltConf(o.optString("conf", ""))) {
+                    changed = true
+                    continue
+                }
+                out.put(o)
+            }
+            if (changed) {
+                val e = sp.edit().putString("wg_list", out.toString())
+                if (sp.getString("wg_active", "") == "WARP") e.putString("wg_active", "")
+                e.apply()
+            }
+        } catch (_: Exception) {}
+        try { getSharedPreferences("renamer_warp", MODE_PRIVATE).edit().clear().apply() } catch (_: Exception) {}
+        try { getSharedPreferences("renamer_engine", MODE_PRIVATE).edit().remove("warp_account").apply() } catch (_: Exception) {}
+        try { deleteSharedPreferences("renamer_tun_warp") } catch (_: Exception) {}
+        try {
+            getSharedPreferences("emergency_settings", MODE_PRIVATE).edit()
+                .remove("connect_method").remove("warp_session").remove("warp_prev_wg_active").apply()
+        } catch (_: Exception) {}
+    }
+
+    /** True when a conf text is one the free-WARP
+     *  feature built: its endpoint is Cloudflare's
+     *  WARP ingress (the registered host, one of the
+     *  alternate ingress IPs, or the 2.64 JSON blob
+     *  that still holds the host). */
+    private fun isWarpBuiltConf(conf: String): Boolean {
+        if (conf.isBlank()) return false
+        return conf.contains("engage.cloudflareclient.com") ||
+            conf.contains("162.159.193.1") || conf.contains("162.159.192.1") ||
+            conf.contains("162.159.195.1") || conf.contains("188.114.96.1")
+    }
+
     /** In-memory connection-event log for this page
      *  only (never persisted): connect, disconnect
      *  and error lines with times, shown only
@@ -287,6 +338,11 @@ class WireGuardActivity : Activity() {
         root.setPadding(32, 32, 32, 32 + fabSize + fabMargin)
         setContentView(frame)
         frame.fitsSystemWindows = true
+        // 2.67: WARP was removed — on first open after the
+        // upgrade, delete the free-WARP tunnel and the
+        // feature's stored identity (local only, no
+        // network), before the list loads.
+        try { removeWarpRemnants() } catch (_: Exception) {}
         loadTunnels()
         refreshList()
         refreshStatus()
@@ -321,6 +377,29 @@ class WireGuardActivity : Activity() {
         activeName = prefs().getString("wg_active", null)?.takeIf { it.isNotBlank() }
         if (activeName != null && tunnels.none { it.name == activeName }) activeName = null
         if (activeName != null) currentTunnel = SimpleTunnel(activeName!!)
+    }
+
+    /** A parse/connect failure must read as a human
+     *  Persian sentence, never a raw exception class name. */
+    private fun humanWgError(e: Throwable): String {
+        val cn = e.javaClass.name
+        val msg = e.message ?: ""
+        return when {
+            cn.contains("BadConfig") || cn.contains("ParseException") ||
+                msg.contains("ParseException") || msg.contains("BadConfig") ->
+                L("کانفیگ خراب است؛ فرمت آن معتبر نیست (نقطه پایانی یا کلید اشتباه است)",
+                  "Invalid config: bad format (bad endpoint or key)")
+            cn.contains("KeyFormat") || msg.contains("Invalid key") ->
+                L("کلید کانفیگ معتبر نیست", "Invalid config key")
+            cn.contains("UnknownHost") || msg.contains("Unable to resolve") ->
+                L("نام سرور حل نشد؛ اینترنت را چک کن", "Could not resolve the server name; check your connection")
+            msg.contains("VPN_NOT_AUTHORIZED") || msg.contains("not authorized") ->
+                L("دسترسی VPN داده نشد", "VPN permission was not granted")
+            msg.contains("TUN_CREATION_ERROR") ->
+                L("ایجاد تونل VPN ممکن نشد؛ یک بار دیگر امتحان کن", "Could not create the VPN tunnel; try again")
+            msg.isNotBlank() && !msg.contains("org.amnezia") && !msg.contains("Exception") && msg.length < 120 -> msg
+            else -> L("وصل نشد؛ خطای نامشخص", "Could not connect; unknown error")
+        }
     }
 
     private fun saveTunnels() {
@@ -711,6 +790,7 @@ class WireGuardActivity : Activity() {
         }
     }
 
+
     private fun showImportMenu() {
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -784,7 +864,7 @@ class WireGuardActivity : Activity() {
             if (WgDirect.isAwgConf(filtered)) AwgConfig.parse(BufferedReader(StringReader(filtered.trim())))
             else Config.parse(BufferedReader(StringReader(filtered.trim())))
         } catch (e: Exception) {
-            statusText.text = L("کانفیگ وایرگارد معتبر نیست: ", "Invalid WireGuard config: ") + (e.message ?: "")
+            statusText.text = L("کانفیگ وایرگارد معتبر نیست: ", "Invalid WireGuard config: ") + humanWgError(e)
             return
         }
         val existing = tunnels.any {
@@ -866,18 +946,28 @@ class WireGuardActivity : Activity() {
             "موتور: بررسی «${t.name}» شروع شد.",
             "Engine: checking \"${t.name}\" started.")
         Thread {
-            val variants = AdaptiveEngine.wgVariants(t.conf)
+            // 2.68: the per-network learned junk
+            // profile (if any) is tried first.
+            val variants = AdaptiveEngine.wgVariants(t.conf, AdaptiveEngine.wgNetWinGet(this, t.name))
             var connected = false
             var winLabel = ""
             var winLabelEn = ""
+            var winId = ""
             for (v in variants) {
-                if (tryWgVariant(t, v.conf)) { connected = true; winLabel = v.labelFa; winLabelEn = v.labelEn; break }
+                if (tryWgVariant(t, v.conf)) { connected = true; winLabel = v.labelFa; winLabelEn = v.labelEn; winId = v.id; break }
             }
             runOnUiThread {
                 if (connected) {
                     AdaptiveEngine.append(this, AdaptiveEngine.S_WG,
                         "موتور: «${t.name}» با «$winLabel» وصل شد.",
                         "Engine: \"${t.name}\" connected with \"$winLabel\".")
+                    // 2.68: remember the winning junk
+                    // profile for this network, and one
+                    // precise green log line (handshake proof).
+                    if (winId.startsWith("junk:")) AdaptiveEngine.wgNetWinPut(this, t.name, winId)
+                    AdaptiveEngine.winGreen(this, "wireguard",
+                        "وایرگارد/امنزیا: روش برنده: «$winLabel»؛ تونل «${t.name}»؛ شبکه «${AdaptiveEngine.netId(this)}»؛ دست‌تکان تازه؛ واقعاً وصل شد",
+                        "WireGuard/Amnezia: winning method: \u201c$winLabelEn\u201d; tunnel \u201c${t.name}\u201d; network \u201c${AdaptiveEngine.netId(this)}\u201d; fresh handshake; really connected")
                     appLogWgAttempted = false
                     AppLog.append(this, "wireguard",
                         "«${t.name}» با روش موتور «$winLabel» وصل شد؛ موتور هوشمند: روشن.",
@@ -958,6 +1048,7 @@ class WireGuardActivity : Activity() {
     // connect that follows a failed engine run.
     private var appLogWgAttempted = false
     private var appLogWgEngineTried = false
+
 
     private fun connectTunnel(t: WgTunnel) {
         WgLog.add(L("شروع اتصال: ", "Connecting: ") + t.name)
@@ -1070,12 +1161,11 @@ class WireGuardActivity : Activity() {
                 if (upTunnel != null && WgTunnelRegistry.awgTunnel === upTunnel)
                     WgTunnelRegistry.awgTunnel = null
                 // This is the real reason, shown in the
-                // status line so it can be reported:
-                // VPN_NOT_AUTHORIZED, TUN_CREATION_ERROR,
-                // DNS_RESOLUTION_FAILURE, GO_ACTIVATION,
-                // bad key, bad endpoint, etc.
+                // status line so it can be reported — as a
+                // human Persian sentence (2.65), never a raw
+                // exception class name.
                 runOnUiThread {
-                    lastError = e.message ?: e.javaClass.simpleName
+                    lastError = humanWgError(e)
                     if (activeName == t.name) activeName = null
                     statusText.text = L("وصل نشد: ", "Failed to connect: ") + lastError
                     refreshList()

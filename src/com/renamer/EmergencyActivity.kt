@@ -69,6 +69,7 @@ class EmergencyActivity : Activity() {
                 ?.map { it.trim() }?.filter { it.isNotBlank() }?.toMutableList()
                 ?: mutableListOf()
         }
+
     }
 
     private fun L(fa: String, en: String): String = AppLanguage.t(this, fa, en)
@@ -661,6 +662,7 @@ class EmergencyActivity : Activity() {
     private fun isEmergencySession(): Boolean =
         VpnClientService.isRunning && VpnClientService.sessionTag == "emergency"
 
+
     private fun refreshButton() {
         if (isEmergencySession()) {
             glassButton("#E8F5E9", "#66BB6A", "#1B5E20")
@@ -694,12 +696,12 @@ class EmergencyActivity : Activity() {
         AdaptiveEngine.setReportVisible(engineReportBtn, this, AdaptiveEngine.S_EMERGENCY)
         if (isEmergencySession() && VpnClientService.emergencyConfig != null) {
             infoText.visibility = android.view.View.VISIBLE
-            infoText.text = L("وصل شد، کلیک کنید برای دیدن پینگ", "Connected, tap to see ping")
+            infoText.text = L("وصل شد با سابسکریبشن، کلیک کنید برای دیدن پینگ", "Connected via subscription, tap to see ping")
             infoText.isClickable = true
             infoText.setOnClickListener { measurePing() }
         } else if (isEmergencySession()) {
             infoText.visibility = android.view.View.VISIBLE
-            infoText.text = L("وصل شد", "Connected")
+            infoText.text = L("وصل شد با سابسکریبشن", "Connected via subscription")
             infoText.isClickable = false
             infoText.setOnClickListener(null)
         } else if (VpnClientService.isRunning) {
@@ -739,13 +741,14 @@ class EmergencyActivity : Activity() {
                 -1L
             }
             runOnUiThread {
-                infoText.text = if (d >= 0) L("وصل شد، پینگ: ", "Connected, ping: ") + "$d ms"
-                                else L("وصل شد، پینگ: -1 ms", "Connected, ping: -1 ms")
+                infoText.text = if (d >= 0) L("وصل شد با سابسکریبشن، پینگ: ", "Connected via subscription, ping: ") + "$d ms"
+                                else L("وصل شد با سابسکریبشن، پینگ: -1 ms", "Connected via subscription, ping: -1 ms")
                 infoText.isClickable = true
                 infoText.setOnClickListener { measurePing() }
             }
         }.start()
     }
+
 
     // 2.43: central-log flip state for the page.
     // PageAttempt marks a connect started from this
@@ -804,6 +807,19 @@ class EmergencyActivity : Activity() {
         startConnectFlow(auto = false)
     }
 
+
+    /** The subscription flow found nothing usable: give up
+     *  (a manual round just refreshes; an auto round chains
+     *  the next round or gives up via finishConnectFlow). */
+    private fun subFailed(auto: Boolean, showSticky: Boolean = true) {
+        busy = false
+        if (showSticky) {
+            stickyInfo = L("هیچ کانفیگ سالمی پیدا نشد؛ بعداً دوباره امتحان کن.", "No healthy config found; try again later.")
+        }
+        if (auto) finishConnectFlow(auto = true, success = false) else refreshAll()
+    }
+
+
     /** 2.61: one connect round, manual or automatic.
      *  Fetch fresh, drop dead-listed configs, run the
      *  ping race, try up to 3 healthy configs. Shared
@@ -857,11 +873,7 @@ class EmergencyActivity : Activity() {
                     configs = filterDead(fetched)
                 }
                 if (configs.isEmpty()) {
-                    runOnUiThread {
-                        busy = false
-                        stickyInfo = L("هیچ کانفیگ سالمی پیدا نشد؛ بعداً دوباره امتحان کن.", "No healthy config found; try again later.")
-                        if (auto) finishConnectFlow(auto = true, success = false) else refreshAll()
-                    }
+                    runOnUiThread { subFailed(auto) }
                     return@Thread
                 }
                 // Approximate time, from the fetched count
@@ -883,8 +895,7 @@ class EmergencyActivity : Activity() {
                 runOnUiThread {
                     busy = false
                     if (ordered.isEmpty()) {
-                        stickyInfo = L("هیچ کانفیگ سالمی پیدا نشد؛ بعداً دوباره امتحان کن.", "No healthy config found; try again later.")
-                        if (auto) finishConnectFlow(auto = true, success = false) else refreshAll()
+                        subFailed(auto)
                         return@runOnUiThread
                     }
                     // Try in order, up to 3 attempts:
@@ -894,10 +905,9 @@ class EmergencyActivity : Activity() {
                     tryEmergencyAt(0)
                 }
             } catch (_: Exception) {
-                runOnUiThread {
-                    busy = false
-                    if (auto) finishConnectFlow(auto = true, success = false) else refreshAll()
-                }
+                // A failed sub flow gives up without inventing a
+                // "no healthy config" message for a fetch error.
+                runOnUiThread { subFailed(auto, showSticky = false) }
             }
         }.start()
     }
@@ -1165,6 +1175,16 @@ class EmergencyActivity : Activity() {
             return
         }
         VpnClientService.emergencyConfig = effective
+        // 2.68: one precise green
+        // line when an engine method won (labels are
+        // generic in emergency mode by design).
+        if (plan != null) {
+            val netE = AdaptiveEngine.netId(this)
+            val spE = if (plan.speedMbps >= 0) String.format(java.util.Locale.US, "%.1f", plan.speedMbps) else ""
+            AdaptiveEngine.winGreen(this, "emergency",
+                "اتصال اضطراری: روش برنده: «${plan.noteFa}»؛ شبکه «$netE»" + (if (spE.isNotBlank()) "؛ سرعت دانلود $spE مگابایت/ثانیه" else "") + "؛ واقعاً وصل شد",
+                "Emergency connect: winning method: \u201c${plan.noteEn}\u201d; network \u201c$netE\u201d" + (if (spE.isNotBlank()) "; download speed $spE MB/s" else "") + "; really connected")
+        }
         val intent = Intent(this, VpnClientService::class.java).apply {
             putExtra("config", vpnConfig)
             // Generic name only, never the real config name.

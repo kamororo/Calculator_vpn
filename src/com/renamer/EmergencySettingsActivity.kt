@@ -56,6 +56,7 @@ class EmergencySettingsActivity : Activity() {
             setPadding(0, 4, 0, 16)
         })
 
+
         root.addView(TextView(this).apply {
             text = L("لینک‌های ساب دلخواه", "Custom subscription links"); textSize = 16f
             setPadding(0, 8, 0, 4)

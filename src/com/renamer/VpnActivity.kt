@@ -129,6 +129,9 @@ class VpnActivity : Activity() {
     private var appLogMode = ""
     private var appLogNoteFa = ""
     private var appLogNoteEn = ""
+    // 2.68: the winning plan's
+    // measured download speed, for the green log line.
+    private var appLogSpeedMbps = -1.0
 
     /** 2.43: record a v2ray attempt (engine state,
      *  mode, type, winning method when there is
@@ -153,6 +156,7 @@ class VpnActivity : Activity() {
         appLogMode = connectMode()
         appLogNoteFa = plan?.noteFa ?: ""
         appLogNoteEn = plan?.noteEn ?: ""
+        appLogSpeedMbps = plan?.speedMbps ?: -1.0
         appLogPending = true
         val engFa = if (engineOn) "موتور هوشمند: روشن" else "موتور هوشمند: خاموش"
         val engEn = if (engineOn) "Smart engine: ON" else "Smart engine: OFF"
@@ -201,6 +205,15 @@ class VpnActivity : Activity() {
             appLogEvent("وصل شد (حالت فقط پروکسی)", "connected (proxy-only mode)")
         } else if (tag == "v2ray") {
             appLogEvent("وصل شد", "connected")
+            // 2.68: one precise
+            // green line when an engine method won.
+            if (appLogEngineOn && appLogNoteFa.isNotBlank()) {
+                val netV = AdaptiveEngine.netId(this)
+                val spV = if (appLogSpeedMbps >= 0) String.format(java.util.Locale.US, "%.1f", appLogSpeedMbps) else ""
+                AdaptiveEngine.winGreen(this, "v2ray",
+                    "موتور هوشمند: روش برنده: «$appLogNoteFa»؛ شبکه «$netV»" + (if (spV.isNotBlank()) "؛ سرعت دانلود $spV مگابایت/ثانیه" else "") + "؛ واقعاً وصل شد",
+                    "Smart engine: winning method: \u201c$appLogNoteEn\u201d; network \u201c$netV\u201d" + (if (spV.isNotBlank()) "; download speed $spV MB/s" else "") + "; really connected")
+            }
             // 2.45: background real-connection check
             // (only when its toggle is ON).
             ConnVerify.verifyXray(this, "v2ray", "v2ray", VpnClientService.currentName ?: appLogName, VpnClientService.sessionSocksPort.takeIf { it > 0 } ?: VpnConfigBuilder.socksPort(this)) { VpnClientService.isRunning && VpnClientService.sessionTag == "v2ray" }
@@ -2270,7 +2283,7 @@ class VpnActivity : Activity() {
             val saved: String? = try {
                 if (!plan.fragment && plan.shape == null) {
                     // Plain link variant (IP/port/fp/
-                    // SNI/transport/flow/jump/WARP):
+                    // SNI/transport/flow/jump):
                     // the link itself IS the repaired
                     // config. A saved jump chain gets
                     // the original's name, not the

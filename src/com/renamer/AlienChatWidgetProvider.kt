@@ -44,11 +44,12 @@ class AlienChatWidgetProvider : AppWidgetProvider() {
                     }
                     val own = AlienChats.parseSub(ShzClient.fetchAny(c.ownView))
                     for ((ts, second) in own.messages)
-                        out += Triple(ts, true, AlienChats.parseReply(second).second)
+                        // 2.64: decrypt at display time (E2E).
+                        out += Triple(ts, true, AlienE2e.displayStored(ctx, c.id, second, mine = true))
                     val partner = AlienChats.parseSub(ShzClient.fetchAny(c.partnerView))
                     for ((ts, second) in partner.messages) {
                         if (ts <= c.myClearTs) continue
-                        out += Triple(ts, false, AlienChats.parseReply(second).second)
+                        out += Triple(ts, false, AlienE2e.displayStored(ctx, c.id, second, mine = false))
                     }
                     out.sortBy { it.first }
                 }

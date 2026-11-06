@@ -99,7 +99,7 @@ class GuideActivity : Activity() {
         val rows = mutableListOf(
             Triple("home", L("صفحه اصلی", "Home page"), L("سه کاشی در هر ردیف، دکمه‌های بالا و نسخه برنامه", "Three tiles per row, top buttons and app version")),
             Triple("v2ray", L("v2ray", "v2ray"), L("لیست سرورها، دکمه اتصال و پرچم کشور", "Server list, connect button and country flag")),
-            Triple("engine", L("موتور هوشمند", "Smart Engine"), L("موج‌های موازی تعمیر، پرش، واپ و نگهبان", "Parallel repair waves, jump, WARP and watchdog")),
+            Triple("engine", L("موتور هوشمند", "Smart Engine"), L("موج‌های موازی تعمیر، پرش و نگهبان", "Parallel repair waves, jump and watchdog")),
             Triple("wireguard", L("وایرگارد و امنزیا", "WireGuard & Amnezia"), L("هر دو نوع با موتور امنزیا وصل می‌شوند", "Both kinds connect through the Amnezia engine")),
             Triple("openvpn", L("OpenVPN", "OpenVPN"), L("تونل رسمی OpenVPN3 با فایل .ovpn", "Official OpenVPN3 tunnel with .ovpn files")),
             Triple("emergency", L("اتصال اضطراری", "Emergency connect"), L("یک دکمه؛ کمی صبر تا به بهترین سرور وصل شود", "One button; wait a little for the best server")),

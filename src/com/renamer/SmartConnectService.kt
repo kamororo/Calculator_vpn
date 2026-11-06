@@ -853,6 +853,40 @@ class SmartConnectService : Service() {
                 // who never tapped "select" in the WG
                 // section still expects Smart to use
                 // their tunnel.
+                // 2.68: engine
+                // pre-step, mirroring the v2ray engine
+                // pre-step above: engine-ON only, junk +
+                // variants with a REAL handshake as proof.
+                // On a win the normal success path runs
+                // and this returns; on any no-win or
+                // failure the EXACT old logic below runs.
+                // Guard invariants untouched.
+                if (AdaptiveEngine.isEnabled(this)) {
+                    try {
+                        if (trySmartWgEngine(false)) {
+                            val deadline = System.currentTimeMillis() + 8000
+                            while (System.currentTimeMillis() < deadline) {
+                                if (WgDirect.isLive(this)) break
+                                Thread.sleep(500)
+                            }
+                            if (WgDirect.isLive(this)) {
+                                setSmartOwnsVpn(true)
+                                lastAttemptOk = true
+                                val netW = AdaptiveEngine.netId(this)
+                                AdaptiveEngine.winGreen(this, "smart",
+                                    "اتصال هوشمند (وایرگارد): روش برنده: «$smartWgWinFa»؛ تونل «$smartWgWinName»؛ شبکه «$netW»؛ واقعاً وصل شد",
+                                    "Smart Connect (WireGuard): winning method: \u201c$smartWgWinEn\u201d; tunnel \u201c$smartWgWinName\u201d; network \u201c$netW\u201d; really connected")
+                                smartWgWinFa = null; smartWgWinEn = null; smartWgWinName = null
+                                val wgName = WgDirect.activeConf(this)?.first
+                                val wgMsg = if (wgName != null) AppLanguage.t(this, "متصل شد (WireGuard): $wgName", "Connected (WireGuard): $wgName") else AppLanguage.t(this, "متصل شد (WireGuard)", "Connected (WireGuard)")
+                                diag(wgMsg)
+                                refreshNotif(wgMsg)
+                                attemptInFlight = false
+                                return
+                            }
+                        }
+                    } catch (_: Throwable) {}
+                }
                 if (!WgDirect.connectFirstOrActive(this)) {
                     if (WgDirect.activeConf(this) == null && WgDirect.firstConf(this) == null)
                         diag(AppLanguage.t(this, "وایرگارد و امنزیا: تونلی در این بخش نیست؛ اول یک تونل اضافه کن", "WireGuard & Amnezia: no tunnel in this section; add one first"))
@@ -887,6 +921,40 @@ class SmartConnectService : Service() {
                 // Amnezia tunnels only: the saved active
                 // tunnel when it is an Amnezia config,
                 // else the first saved Amnezia tunnel.
+                // 2.68: engine
+                // pre-step, mirroring the v2ray engine
+                // pre-step above (same shape as the
+                // wireguard branch): engine-ON only, junk
+                // + variants with a REAL handshake as
+                // proof. On a win the normal success path
+                // runs and this returns; on any no-win or
+                // failure the EXACT old logic below runs.
+                if (AdaptiveEngine.isEnabled(this)) {
+                    try {
+                        if (trySmartWgEngine(true)) {
+                            val deadline = System.currentTimeMillis() + 8000
+                            while (System.currentTimeMillis() < deadline) {
+                                if (WgDirect.isLive(this)) break
+                                Thread.sleep(500)
+                            }
+                            if (WgDirect.isLive(this)) {
+                                setSmartOwnsVpn(true)
+                                lastAttemptOk = true
+                                val netA = AdaptiveEngine.netId(this)
+                                AdaptiveEngine.winGreen(this, "smart",
+                                    "اتصال هوشمند (امنزیا): روش برنده: «$smartWgWinFa»؛ تونل «$smartWgWinName»؛ شبکه «$netA»؛ واقعاً وصل شد",
+                                    "Smart Connect (Amnezia): winning method: \u201c$smartWgWinEn\u201d; tunnel \u201c$smartWgWinName\u201d; network \u201c$netA\u201d; really connected")
+                                smartWgWinFa = null; smartWgWinEn = null; smartWgWinName = null
+                                val awgName = WgDirect.activeConf(this)?.first
+                                val awgMsg = if (awgName != null) AppLanguage.t(this, "متصل شد (امنزیا): $awgName", "Connected (AmneziaWG): $awgName") else AppLanguage.t(this, "متصل شد (امنزیا)", "Connected (AmneziaWG)")
+                                diag(awgMsg)
+                                refreshNotif(awgMsg)
+                                attemptInFlight = false
+                                return
+                            }
+                        }
+                    } catch (_: Throwable) {}
+                }
                 if (!WgDirect.connectFirstOrActiveAwg(this)) {
                     if (WgDirect.firstAwgConf(this) == null)
                         diag(AppLanguage.t(this, "امنزیا: تونلی در این بخش نیست؛ اول یک تونل امنزیا اضافه کن", "AmneziaWG: no Amnezia tunnel in this section; add one first"))
@@ -1024,6 +1092,14 @@ class SmartConnectService : Service() {
                                     val eMsg = AppLanguage.t(this, "متصل شد (موتور هوشمند): ", "Connected (Smart Engine): ") + XraySpeedtest.displayName(plan.link)
                                     diag(eMsg)
                                     refreshNotif(eMsg)
+                                    // 2.68: one
+                                    // precise green line with the winning
+                                    // method, network and download speed.
+                                    val netS = AdaptiveEngine.netId(this)
+                                    val spS = if (plan.speedMbps >= 0) String.format(java.util.Locale.US, "%.1f", plan.speedMbps) else ""
+                                    AdaptiveEngine.winGreen(this, "smart",
+                                        "اتصال هوشمند (v2ray): روش برنده: «${plan.noteFa}»؛ شبکه «$netS»" + (if (spS.isNotBlank()) "؛ سرعت دانلود $spS مگابایت/ثانیه" else "") + "؛ واقعاً وصل شد",
+                                        "Smart Connect (v2ray): winning method: \u201c${plan.noteEn}\u201d; network \u201c$netS\u201d" + (if (spS.isNotBlank()) "; download speed $spS MB/s" else "") + "; really connected")
                                     attemptInFlight = false
                                     return
                                 }
@@ -1147,6 +1223,70 @@ class SmartConnectService : Service() {
      *  non-null Intent, which only an Activity can show).
      *  The caller checks VpnClientService.isRunning to
      *  confirm the VPN actually came up. */
+    // 2.68: Smart Connect WG
+    // target through the engine. Same target selection
+    // as WgDirect.connectFirstOrActive (saved active
+    // tunnel, else first saved tunnel; Amnezia-only
+    // variant for the amnezia target), but each
+    // candidate is tried as engine variants (junk
+    // profiles first, then IPs/MTU/ports) with a REAL
+    // handshake as proof. A variant that handshakes
+    // stays up and wins; all failures fall through to
+    // the plain connect below, so Smart's invariants
+    // are untouched. Bounded: at most 5 variants and
+    // 30s total, inside Smart's 60s deadline.
+    private var smartWgWinFa: String? = null
+    private var smartWgWinEn: String? = null
+    private var smartWgWinName: String? = null
+
+    private fun trySmartWgEngine(amneziaOnly: Boolean): Boolean {
+        try {
+            if (android.net.VpnService.prepare(this) != null) return false
+            if (VpnClientService.isRunning || WgDirect.isLive(this)) return false
+            val target = if (amneziaOnly) {
+                val a = WgDirect.activeConf(this)
+                if (a != null && WgDirect.isAwgConf(a.second)) a
+                else WgDirect.firstAwgConf(this)?.also { (nm, _) ->
+                    try { getSharedPreferences("renamer_wg", MODE_PRIVATE).edit().putString("wg_active", nm).apply() } catch (_: Exception) {}
+                }
+            } else {
+                WgDirect.activeConf(this) ?: WgDirect.firstConf(this)?.also { (nm, _) ->
+                    try { getSharedPreferences("renamer_wg", MODE_PRIVATE).edit().putString("wg_active", nm).apply() } catch (_: Exception) {}
+                }
+            } ?: return false
+            val (tName, tConf) = target
+            val learned = AdaptiveEngine.wgNetWinGet(this, tName)
+            val variants = AdaptiveEngine.wgVariants(tConf, learned).take(5)
+            val helperDeadline = System.currentTimeMillis() + 30000
+            for (v in variants) {
+                if (System.currentTimeMillis() > helperDeadline) break
+                val startMs = System.currentTimeMillis()
+                if (!WgDirect.connectConfText(this, tName, v.conf)) continue
+                var ok = false
+                val deadline = minOf(helperDeadline, System.currentTimeMillis() + 6000)
+                while (System.currentTimeMillis() < deadline) {
+                    try {
+                        val tunnel = WgDirect.currentAwgTunnel()
+                        val hs = if (tunnel != null) AwgBackend.get(this).getLastHandshake(tunnel) else 0L
+                        if (hs > 0 && hs * 1000 >= startMs - 10000) { ok = true; break }
+                    } catch (_: Exception) {}
+                    Thread.sleep(500)
+                }
+                if (ok) {
+                    if (v.id.startsWith("junk:")) AdaptiveEngine.wgNetWinPut(this, tName, v.id)
+                    smartWgWinFa = v.labelFa
+                    smartWgWinEn = v.labelEn
+                    smartWgWinName = tName
+                    return true
+                }
+                try { WgDirect.disconnect(this) } catch (_: Exception) {}
+                Thread.sleep(300)
+            }
+            try { WgDirect.disconnect(this) } catch (_: Exception) {}
+            return false
+        } catch (_: Exception) { return false }
+    }
+
     private fun startVpnConfig(cfg: String, plan: AdaptiveEngine.Plan? = null, origLink: String? = null): Boolean {
         return try {
             // Direct connect, exactly as the last

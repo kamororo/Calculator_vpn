@@ -24,7 +24,7 @@ import org.json.JSONObject
  *  to parallel racing: the original is still probed
  *  first, but a dead config's candidates race in
  *  waves (jump + packet shapes first, then IP/port/
- *  transport, then a free Cloudflare WARP rung), so
+ *  transport, then CDN edges, combinations and a chain), so
  *  the repair that took 45s and never reached the
  *  jump rung now usually lands in seconds. Winners
  *  are learned per config AND per network (global
@@ -343,6 +343,84 @@ object AdaptiveEngine {
         try { store(ctx).edit().putString(memKey(ctx, dedupKey), mutationId).apply() } catch (_: Exception) {}
     }
 
+    /** 2.68: one precise green
+     *  log line — the method that worked, the network
+     *  it worked on, and the measured result.
+     *  AppLogActivity renders lines starting with
+     *  "[\u2713]" green + bold. One line per win,
+     *  never per failed attempt. */
+    fun winGreen(ctx: Context, section: String, fa: String, en: String) {
+        AppLog.append(ctx, section, "[\u2713] $fa", "[\u2713] $en")
+    }
+
+    /** 2.68: the network this device is on, as
+     *  specifically as the app can see it WITHOUT new
+     *  permissions: Wi-Fi is just "wifi" (the SSID
+     *  needs a location permission, deliberately NOT
+     *  used — no Wi-Fi-state permission is declared),
+     *  mobile is the carrier name (no permission
+     *  needed), else the plain wifi/cell/other key.
+     *  Per-network winner memory below is keyed on
+     *  this. */
+    fun netId(ctx: Context): String {
+        return try {
+            when (netKey(ctx)) {
+                "wifi" -> "wifi"
+                "cell" -> {
+                    val op = try {
+                        val tm = ctx.getSystemService(Context.TELEPHONY_SERVICE) as android.telephony.TelephonyManager
+                        tm.networkOperatorName?.trim()
+                    } catch (_: Exception) { null }
+                    if (!op.isNullOrBlank()) "cell:$op" else "cell"
+                }
+                else -> netKey(ctx)
+            }
+        } catch (_: Exception) { netKey(ctx) }
+    }
+
+    private fun netIdSafe(ctx: Context): String =
+        netId(ctx).replace(Regex("[^A-Za-z0-9_:\\-.]"), "_")
+
+    /** 2.68: the winning v2ray method id for one
+     *  config on THIS network (SSID/carrier). Tried
+     *  first on that network next time. */
+    fun netWinGet(ctx: Context, dedupKey: String): String? {
+        return try { store(ctx).getString("netwin_" + netIdSafe(ctx) + "_" + dedupKey, null)?.takeIf { it.isNotBlank() } } catch (_: Exception) { null }
+    }
+
+    fun netWinPut(ctx: Context, dedupKey: String, methodId: String) {
+        try { store(ctx).edit().putString("netwin_" + netIdSafe(ctx) + "_" + dedupKey, methodId).apply() } catch (_: Exception) {}
+    }
+
+    /** 2.68: the winning WG variant id for one
+     *  tunnel on THIS network (SSID/carrier). */
+    fun wgNetWinGet(ctx: Context, tunnelName: String): String? {
+        return try { store(ctx).getString("netwin_wg_" + netIdSafe(ctx) + "_" + tunnelName, null)?.takeIf { it.isNotBlank() } } catch (_: Exception) { null }
+    }
+
+    fun wgNetWinPut(ctx: Context, tunnelName: String, variantId: String) {
+        try { store(ctx).edit().putString("netwin_wg_" + netIdSafe(ctx) + "_" + tunnelName, variantId).apply() } catch (_: Exception) {}
+    }
+
+    /** 2.68: does this link's protocol support
+     *  auto Mux (vmess/vless, link or custom JSON)?
+     *  Auto Mux never applies to a flow (VLESS
+     *  xtls-rprx-vision etc.): the builder forces mux
+     *  concurrency -1 there, and an unprobed mux
+     *  change must not risk a proven win. (The MUX
+     *  shape candidate itself is still offered — it
+     *  IS probe-validated with mux.) */
+    fun supportsMuxLink(link: String): Boolean {
+        return try {
+            if (link.startsWith("vmess://")) return true
+            if (link.startsWith("vless://")) return (queryParam(link, "flow") ?: "").isBlank()
+            if (XraySpeedtest.isCustom(link)) {
+                val p = customProto(link)
+                (p == "vmess" || p == "vless") && customFlow(link).isBlank()
+            } else false
+        } catch (_: Exception) { false }
+    }
+
     // ---------- explanation (the "!" dialog) ----------
 
     fun explainText(ctx: Context): String {
@@ -354,7 +432,7 @@ object AdaptiveEngine {
 
 وقتی روشن است دقیقاً چه می‌کند؟
 • از همان لحظه‌ی اول روش‌های خود موتور را تست می‌کند و دیگر اتصال عادی کانفیگ را امتحان نمی‌کند؛ اگر روشی جواب داد، با همان نسخه وصل می‌شود.
-• اگر کانفیگ جواب نداد، گزینه‌ها را موازی و در چند موج می‌سنجد، نه یکی‌یکی: موج اول پرش از یک کانفیگ سالم دیگر (همان کاری که بخش زنجیره دوتایی می‌کند)، فرگمنت کردن بسته‌های TLS، چرخش اثر انگشت مرورگر، درست کردن SNI و شکل‌های بسته‌ای هیدرا (دی‌سینک) است؛ موج دوم آدرس‌های IP جایگزین همان سرور، پورت‌های جایگزین، عوض کردن ترنسپورت و حذف flow است؛ موج‌های بعدی لبه‌های CDN و واپ رایگان کلادفلر (که حسابش داخل خود برنامه ساخته می‌شود) هستند؛ و اگر هیچ موج مستقیمی جواب نداد، موج آخر زنجیره است: کانفیگ هدف به‌عنوان خروجی، از پشت کانفیگ‌های سالم دیگر برنامه.
+• اگر کانفیگ جواب نداد، گزینه‌ها را موازی و در چند موج می‌سنجد، نه یکی‌یکی: موج اول پرش از یک کانفیگ سالم دیگر (همان کاری که بخش زنجیره دوتایی می‌کند)، فرگمنت کردن بسته‌های TLS، چرخش اثر انگشت مرورگر، درست کردن SNI و شکل‌های بسته‌ای هیدرا (دی‌سینک) است؛ موج دوم آدرس‌های IP جایگزین همان سرور، پورت‌های جایگزین، عوض کردن ترنسپورت و حذف flow است؛ موج‌های بعدی لبه‌های CDN و ترکیب‌های موج‌های تکی هستند؛ و اگر هیچ موج مستقیمی جواب نداد، موج آخر زنجیره است: کانفیگ هدف به‌عنوان خروجی، از پشت کانفیگ‌های سالم دیگر برنامه.
 • نتیجه‌ی هر گزینه را با تست واقعی از داخل همان کانفیگ می‌سنجد، نه با حدس.
 • برنده‌ی هر کانفیگ و برنده‌ی کلی هر شبکه (وای‌فای یا موبایل) را به خاطر می‌سپارد تا دفعه‌ی بعد اول همان‌ها امتحان شوند.
 • نسخه‌ی کامل برنده‌ی هر کانفیگ روی هر شبکه (مسیر گرم) هم ذخیره می‌شود تا اتصال بعدی همان کانفیگ فقط با یک تست وصل شود؛ وضعیت شبکه (آیا کلادفلر در دسترس است) سنجیده می‌شود تا موج‌های بی‌فایده ساخته نشوند؛ آی‌پی‌هایی که دو بار پشت سر هم مرده‌اند مدتی کنار گذاشته می‌شوند؛ و وقتی یک موج چند گزینه‌ی سالم دارد، برنده با پشتیبان‌هایش در یک تونل می‌نشیند تا مرگ مسیر اصلی، اتصال را نیندازد.
@@ -376,7 +454,7 @@ object AdaptiveEngine {
 در بخش v2ray، وقتی موتور روشن است، دکمه‌ی «تعمیر دسته‌ای» کانفیگ‌های خراب را یکی‌یکی با موتور بررسی می‌کند و نسخه‌های تعمیرشده را فقط با تأیید تو، به‌عنوان کانفیگ جدید ذخیره می‌کند؛ کانفیگ اصلی دست نمی‌خورد.
 
 وقتی موتور خاموش می‌شود چه می‌شود؟
-همه‌چیز به حالت قبل از روشن شدن برمی‌گردد: حافظه‌ی یادگیری و گزارش‌ها پاک می‌شوند، حساب واپ ساخته‌شده پاک می‌شود، و اگر اتصالی با موتور برقرار بود قطع می‌شود تا با اتصال عادی جایگزین شود. وقتی خاموش است، هیچ دکمه و هیچ فعالیتی از موتور دیده نمی‌شود و برنامه دقیقاً مثل قبل از اضافه شدن موتور کار می‌کند.
+همه‌چیز به حالت قبل از روشن شدن برمی‌گردد: حافظه‌ی یادگیری و گزارش‌ها پاک می‌شوند، و اگر اتصالی با موتور برقرار بود قطع می‌شود تا با اتصال عادی جایگزین شود. وقتی خاموش است، هیچ دکمه و هیچ فعالیتی از موتور دیده نمی‌شود و برنامه دقیقاً مثل قبل از اضافه شدن موتور کار می‌کند.
 
 چه چیزی را هرگز انجام نمی‌دهد؟
 • کانفیگ‌های ذخیره‌شده‌ی شما را تغییر نمی‌دهد و نسخه‌ی تعمیرشده را جایگزین نمی‌کند؛ فقط همان یک بار اتصال با نسخه‌ی بهتر انجام می‌شود (به‌جز تعمیر دسته‌ای که با تأیید خودت ذخیره می‌کند).
@@ -388,14 +466,22 @@ object AdaptiveEngine {
 
 محدودیت‌های صادقانه:
 • اگر سرور خودش خاموش باشد، رمز یا UUID عوض شده باشد، یا اشتراک تمام شده باشد، هیچ دستکاری‌ای آن را زنده نمی‌کند؛ موتور فقط انسداد شبکه‌ای را دور می‌زند.
-• بررسی موتور چند ثانیه به اتصال اضافه می‌کند؛ برای کانفیگ سالم معمولاً همان یک تست اول است."""
+• بررسی موتور چند ثانیه به اتصال اضافه می‌کند؛ برای کانفیگ سالم معمولاً همان یک تست اول است.
+
+تازه‌های ۲٫۶۸ (فقط وقتی موتور هوشمند روشن است):
+• وایرگارد و امنزیا: پروفایل‌های جانک (Jc/Jmin/Jmax) خودکار امتحان می‌شوند تا دست‌تکان از فیلتر رد شود؛ فقط وقتی کانفیگ خودش جانک ندارد. اگر آی‌پی سرور کاملاً بسته باشد یا UDP به آن بسته باشد، جانک هم کمکی نمی‌کند.
+• اتصال هوشمند برای هدف وایرگارد/امنزیا هم از موتور استفاده می‌کند (جانک و روش‌های دیگر).
+• وقتی چند روش جواب بدهد، برنده با سرعت دانلود واقعی (مگابایت/ثانیه) انتخاب می‌شود، نه فقط با پینگ.
+• اثر انگشت‌های بیشتر (edge، ios، android، randomized) و پورت‌های بیشتر (2087، 2095، 8080) امتحان می‌شوند؛ لبه‌های CDN آروان‌کلاد هم اضافه شده است.
+• Mux برای vmess/vless به‌صورت خودکار روشن می‌شود.
+• برنده هر شبکه (وای‌فای یا اپراتور موبایل) ذخیره می‌شود و دفعه بعد اول امتحان می‌شود."""
 
     private const val EN_EXPLAIN = """What is the Smart Engine?
 The Smart Engine is a helper layer, not a separate VPN. When it is on, it is tried FIRST in every connection section (v2ray, WireGuard & Amnezia, OpenVPN, Hydra, Smart Connect and Emergency connect), and if it cannot help, the section's normal connection runs exactly as before. So turning it on can never break a connection that already worked.
 
 What exactly does it do when on?
 • From the very first moment it tests the engine's own methods — it no longer tries the config's normal connection first. If a method works, it connects with that variant.
-• If the config does not respond, it races the candidates in parallel waves instead of one by one: wave 1 is a jump via another healthy config (the same trick the Double Chain section uses), TLS packet fragmenting, browser fingerprint rotation, SNI repair and Hydra's packet shapes (desync); wave 2 is alternate IPs of the same server, alternate ports, transport swap and flow removal; the later waves are CDN edges and free Cloudflare WARP (whose account is generated inside the app); and if no direct wave works, the last wave is a chain: the target config as the exit, dialed through the app's other healthy configs.
+• If the config does not respond, it races the candidates in parallel waves instead of one by one: wave 1 is a jump via another healthy config (the same trick the Double Chain section uses), TLS packet fragmenting, browser fingerprint rotation, SNI repair and Hydra's packet shapes (desync); wave 2 is alternate IPs of the same server, alternate ports, transport swap and flow removal; the later waves are CDN edges and combinations of single wins; and if no direct wave works, the last wave is a chain: the target config as the exit, dialed through the app's other healthy configs.
 • Every candidate is measured with a real test through that candidate, not a guess.
 • The winner per config and the winner per network (Wi-Fi or mobile) are remembered, so next time they are tried first.
 • The full winning variant of each config per network (warm route) is also remembered, so the next connect with the same config needs only one probe; the network verdict (is Cloudflare reachable) is measured so useless waves are never built; dial IPs that failed twice in a row are benched for a while; and when a wave has several healthy candidates, the winner sits in one tunnel with its runners-up as standbys, so a dead primary does not drop the connection.
@@ -417,7 +503,7 @@ Batch repair:
 In the v2ray section, while the engine is on, a "Batch repair" button checks the dead configs one by one with the engine and saves the repaired copies only with your confirmation, as NEW configs; the originals are never touched.
 
 What happens when the engine is switched off?
-Everything returns to the state before it was switched on: learned winners and reports are wiped, the generated WARP account is wiped, and any live engine session is stopped so a normal connection can replace it. When it is off, no button and no activity of the engine is visible, and the app works exactly as before the engine was added.
+Everything returns to the state before it was switched on: learned winners and reports are wiped, and any live engine session is stopped so a normal connection can replace it. When it is off, no button and no activity of the engine is visible, and the app works exactly as before the engine was added.
 
 What does it NEVER do?
 • It never changes your saved configs and never replaces one with a repaired copy; only that one connection uses the better variant (except batch repair, which saves only with your confirmation).
@@ -428,7 +514,15 @@ An "Engine report" button appears in the sections where the engine can work (v2r
 
 Honest limits:
 • If the server itself is down, the password or UUID changed, or the subscription expired, no manipulation revives it; the engine only bypasses network-level blocking.
-• Checking adds a few seconds before connecting; for a healthy config it is usually just the first test."""
+• Checking adds a few seconds before connecting; for a healthy config it is usually just the first test.
+
+New in 2.68 (engine-ON only):
+• WireGuard & Amnezia: automatic junk profiles (Jc/Jmin/Jmax) are tried so the handshake gets past the filter; only when the config has no junk of its own. If the server IP is fully blocked or UDP to it is closed, junk cannot help either.
+• Smart Connect also uses the engine (junk and the other methods) for a WireGuard/Amnezia target.
+• When several methods work, the winner is picked by real download speed (MB/s), not by ping alone.
+• More fingerprints (edge, ios, android, randomized) and more ports (2087, 2095, 8080) are tried; ArvanCloud CDN edges were added too.
+• Mux is enabled automatically for vmess/vless.
+• The winner per network (Wi-Fi or mobile carrier) is remembered and tried first next time."""
 
     // ---------- v2ray link surgery ----------
 
@@ -437,7 +531,11 @@ Honest limits:
 
     data class Plan(val link: String, val fragment: Boolean, val noteFa: String, val noteEn: String,
         val shape: String? = null, val shapeHost: String = "",
-        val standbys: List<String> = emptyList())
+        val standbys: List<String> = emptyList(),
+        // 2.68: real download speed (MB/s) measured
+        // while ranking the winners (-1 = not measured),
+        // and whether Mux is auto-enabled for this plan.
+        val speedMbps: Double = -1.0, val muxAuto: Boolean = false)
 
     private fun splitFrag(link: String): Pair<String, String> {
         val i = link.indexOf('#')
@@ -605,7 +703,7 @@ Honest limits:
         // wave left healthy runners-up, rebuild
         // the config around one balancer so a
         // dead primary fails over in-tunnel.
-        // Never for chain or JSON (warp/custom)
+        // Never for chain or JSON (custom)
         // primaries; any failure keeps the old
         // single-outbound build.
         if (plan.standbys.isNotEmpty() && !plan.link.startsWith("CHAIN::") && !plan.link.trimStart().startsWith("{")) {
@@ -644,6 +742,18 @@ Honest limits:
             out = try {
                 val st = HydraEngine.Strategy.valueOf(plan.shape)
                 HydraEngine.applyStrategy(out, st, plan.shapeHost) ?: out
+            } catch (_: Exception) { out }
+        }
+        // 2.68: auto Mux — when the winning method
+        // supports it (vmess/vless) and the win was not
+        // the MUX shape itself, enable mux on the built
+        // JSON. applyStrategy is null-safe (no-op when
+        // mux is already set or the protocol is not
+        // vmess/vless), so a miss here can never break
+        // the connect.
+        if (plan.muxAuto) {
+            out = try {
+                HydraEngine.applyStrategy(out, HydraEngine.Strategy.MUX, plan.shapeHost) ?: out
             } catch (_: Exception) { out }
         }
         return out
@@ -777,6 +887,113 @@ Honest limits:
         return raceWaveTop(ctx, muts, deadline, 1, 0).winners.firstOrNull()
     }
 
+    /** 2.68: REAL download speed (MB/s) through
+     *  one candidate link. A throwaway Xray core is
+     *  started from the speedtest config with a local
+     *  SOCKS inbound, then a 2 MB file is downloaded
+     *  through it and timed. -1.0 on any failure
+     *  (the caller falls back to delay order). The
+     *  core is always stopped. */
+    fun measureDownloadMbps(ctx: Context, link: String, timeoutMs: Long = 15000): Double {
+        var controller: libv2ray.CoreController? = null
+        return try {
+            if (!CoreInit.init(ctx)) return -1.0
+            val base = XraySpeedtest.buildSpeedtestConfig(link) ?: return -1.0
+            val port = try {
+                java.net.ServerSocket(0).use { it.localPort }
+            } catch (_: Exception) { return -1.0 }
+            val root = org.json.JSONObject(base)
+            val inbounds = org.json.JSONArray()
+            inbounds.put(org.json.JSONObject().apply {
+                put("protocol", "socks")
+                put("tag", "test-speed-in")
+                put("port", port)
+                put("listen", "127.0.0.1")
+                put("settings", org.json.JSONObject().apply {
+                    put("auth", "noauth")
+                    put("udp", false)
+                })
+            })
+            root.put("inbounds", inbounds)
+            val c = libv2ray.Libv2ray.newCoreController(object : libv2ray.CoreCallbackHandler {
+                override fun onEmitStatus(code: Long, message: String?): Long = 0
+                override fun shutdown(): Long = 0
+                override fun startup(): Long = 0
+            })
+            controller = c
+            c.startLoop(root.toString(), -1)
+            Thread.sleep(1200)
+            val proxy = java.net.Proxy(java.net.Proxy.Type.SOCKS,
+                java.net.InetSocketAddress("127.0.0.1", port))
+            val conn = java.net.URL("https://speed.cloudflare.com/__down?bytes=2000000")
+                .openConnection(proxy) as java.net.HttpURLConnection
+            conn.connectTimeout = timeoutMs.toInt()
+            conn.readTimeout = timeoutMs.toInt()
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0")
+            val start = System.nanoTime()
+            var bytes = 0L
+            conn.inputStream.use { inp ->
+                val buf = ByteArray(32 * 1024)
+                while (true) {
+                    val n = inp.read(buf)
+                    if (n < 0) break
+                    bytes += n
+                    if (bytes >= 2_000_000L) break
+                    if (System.nanoTime() - start > timeoutMs * 1_000_000L) return -1.0
+                }
+            }
+            val secs = (System.nanoTime() - start) / 1e9
+            if (bytes <= 0 || secs <= 0) -1.0 else (bytes / 1024.0 / 1024.0) / secs
+        } catch (_: Throwable) { -1.0 } finally {
+            try { controller?.stopLoop() } catch (_: Exception) {}
+        }
+    }
+
+    /** 2.68: re-rank a wave's healthy winners by
+     *  REAL download speed (MB/s) instead of delay
+     *  alone. Only when there is more than one winner
+     *  and time is left in the budget; every failure
+     *  keeps delay order. The winner's speed travels
+     *  with it (Triple third) into win() and the Plan. */
+    private fun rankWinnersBySpeed(ctx: Context, winners: List<Pair<Mut, Long>>, section: String, deadline: Long): List<Triple<Mut, Long, Double>> {
+        if (winners.size < 2) return winners.map { Triple(it.first, it.second, -1.0) }
+        if (System.currentTimeMillis() > deadline - 3000) return winners.map { Triple(it.first, it.second, -1.0) }
+        return try {
+            val pool = java.util.concurrent.Executors.newFixedThreadPool(winners.size) { r -> Thread(r).apply { isDaemon = true } }
+            try {
+                val futs = winners.map { (m, ms) ->
+                    pool.submit(java.util.concurrent.Callable {
+                        Triple(m, ms, measureDownloadMbps(ctx, m.link))
+                    })
+                }
+                val out = mutableListOf<Triple<Mut, Long, Double>>()
+                for ((idx, f) in futs.withIndex()) {
+                    try {
+                        val left = deadline - System.currentTimeMillis()
+                        out += if (left > 2000) f.get(left, java.util.concurrent.TimeUnit.MILLISECONDS)
+                               else Triple(winners[idx].first, winners[idx].second, -1.0)
+                    } catch (_: Exception) {
+                        try { f.cancel(true) } catch (_: Exception) {}
+                        out += Triple(winners[idx].first, winners[idx].second, -1.0)
+                    }
+                }
+                val ranked = out.sortedWith(compareByDescending<Triple<Mut, Long, Double>> { it.third >= 0 }
+                    .thenByDescending { it.third }.thenBy { it.second })
+                val best = ranked.firstOrNull()
+                val delayBest = winners.minByOrNull { it.second }
+                if (best != null && best.third >= 0 && delayBest != null && best.first.id != delayBest.first.id) {
+                    val sp = String.format(java.util.Locale.US, "%.1f", best.third)
+                    append(ctx, section,
+                        "موتور: برنده با سرعت دانلود انتخاب شد: «${best.first.labelFa}» ($sp مگابایت/ثانیه) به‌جای «${delayBest.first.labelFa}» (${delayBest.second} ms).",
+                        "Engine: winner picked by download speed: \"${best.first.labelEn}\" ($sp MB/s) instead of \"${delayBest.first.labelEn}\" (${delayBest.second} ms).")
+                }
+                ranked
+            } finally {
+                try { pool.shutdownNow() } catch (_: Exception) {}
+            }
+        } catch (_: Exception) { winners.map { Triple(it.first, it.second, -1.0) } }
+    }
+
     /** The v2ray selector (1.79: parallel racing).
      *  Synchronous — the caller runs it on a
      *  background thread. Returns a Plan for the
@@ -797,9 +1014,7 @@ Honest limits:
      *  alternate IPs, alternate ports, transport
      *  swap, flow removal; (3.5) WAVE 2.5, raced:
      *  CDN pool scan for TLS WS/gRPC/HTTP configs
-     *  with an explicit SNI behind a known CDN;
-     *  (4) WAVE 3: a free Cloudflare WARP account
-     *  generated in-app.
+     *  with an explicit SNI behind a known CDN.
      *  Emergency section: generic names only, no
      *  IPs in labels, and nothing is memorized. */
     /** One vmess JSON field, decoded (same pattern
@@ -842,7 +1057,7 @@ Honest limits:
             val nameFa = CdnPools.nameFa(cdn)
             val nameEn = CdnPools.nameEn(cdn)
             val out = mutableListOf<Mut>()
-            for (ip in CdnPools.candidates(cdn, 64)) {
+            for (ip in CdnPools.candidates(cdn, 64, dense = true)) {
                 if (probeIps.contains(ip)) continue
                 val v = if (XraySpeedtest.isCustom(cfg)) customMutate(cfg) { ob -> setAddress(ob, ip) }
                         else if (cfg.startsWith("vmess://")) vmessMutate(cfg) { j -> j.put("add", ip) }
@@ -1141,15 +1356,18 @@ Honest limits:
                 } catch (_: Exception) {}
             }.also { it.start() }
             val hostOf = host
-            fun win(m: Mut, ms: Long, standbys: List<String> = emptyList()): Plan {
+            fun win(m: Mut, ms: Long, standbys: List<String> = emptyList(), speedMbps: Double = -1.0): Plan {
                 if (!emergency) {
                     if (m.id != "cdn" && !m.id.startsWith("combo:") && !m.id.startsWith("chain:")) memPut(ctx, dedup, m.id)
+                    // 2.68: the win is also remembered
+                    // for THIS network (SSID/carrier).
+                    if (m.id != "cdn" && !m.id.startsWith("combo:") && !m.id.startsWith("chain:")) netWinPut(ctx, dedup, m.id)
                     // Global learning: the winning
                     // CLASS is remembered per network,
                     // so the next dead config on this
                     // network tries it first. IPs are
                     // server-specific and never go
-                    // global; jump/warp need no help.
+                    // global; jump needs no help.
                     val gclass = when {
                         m.id == "fragment" -> "fragment"
                         m.id.startsWith("fp:") -> m.id
@@ -1163,30 +1381,35 @@ Honest limits:
                     if (gclass != null && m.id != "cdn") gmemPut(ctx, gclass)
                     // Warm route: the full winning
                     // variant, so a repeat connect
-                    // is one probe. Never warp or
-                    // combos; chains are allowed —
-                    // they were probe-validated.
-                    if (m.id != "warp" && !m.id.startsWith("combo:")) {
+                    // is one probe. Never combos;
+                    // chains are allowed — they were
+                    // probe-validated.
+                    if (!m.id.startsWith("combo:")) {
                         warmPut(ctx, dedup, m.link, m.fragment, m.shape)
                     }
                     // A win rehabilitates a benched
                     // dial IP at once.
                     dialIpOf(m)?.let { brkClear(ctx, it) }
                 }
+                val speedFa = if (speedMbps >= 0) "؛ سرعت دانلود " + String.format(java.util.Locale.US, "%.1f", speedMbps) + " مگابایت/ثانیه" else ""
+                val speedEn = if (speedMbps >= 0) "; download speed " + String.format(java.util.Locale.US, "%.1f", speedMbps) + " MB/s" else ""
+                val muxAuto = supportsMuxLink(m.link) && m.shape != "MUX"
+                val muxFa = if (muxAuto) "؛ Mux خودکار" else ""
+                val muxEn = if (muxAuto) "; auto Mux" else ""
                 append(ctx, section,
-                    "موتور: ✓ «$name» با «${m.labelFa}» ($ms ms)",
-                    "Engine: ✓ \"$name\" with \"${m.labelEn}\" ($ms ms)")
-                return Plan(m.link, m.fragment, m.labelFa, m.labelEn, m.shape, hostOf, standbys)
+                    "موتور: ✓ «$name» با «${m.labelFa}» ($ms ms) واقعاً وصل شد$speedFa$muxFa",
+                    "Engine: ✓ \"$name\" with \"${m.labelEn}\" ($ms ms) really connected$speedEn$muxEn")
+                return Plan(m.link, m.fragment, m.labelFa, m.labelEn, m.shape, hostOf, standbys, speedMbps, muxAuto)
             }
             // Standby links from a scored race: the
             // healthy runners-up, primary excluded.
-            // Never for emergency, chain or warp
-            // primaries, and never chain/warp links.
-            fun standbyLinks(out: RaceOut, winner: Mut): List<String> {
+            // Never for emergency or chain primaries,
+            // and never chain links.
+            fun standbyLinks(winners: List<Triple<Mut, Long, Double>>, winner: Mut): List<String> {
                 if (emergency) return emptyList()
-                if (winner.link.startsWith("CHAIN::") || winner.id == "warp") return emptyList()
-                return out.winners.drop(1).mapNotNull { (wm, _) ->
-                    if (wm.link.startsWith("CHAIN::") || wm.id == "warp") null
+                if (winner.link.startsWith("CHAIN::")) return emptyList()
+                return winners.drop(1).mapNotNull { (wm, _, _) ->
+                    if (wm.link.startsWith("CHAIN::")) null
                     else if (wm.link == winner.link) null
                     else wm.link
                 }.distinct().take(2)
@@ -1202,14 +1425,18 @@ Honest limits:
                 if (sec == "reality") "Reality fragment (1-3, 50-100)" else "TLS fragment (tlshello, 50-100)")
             if (isUriLink(cfg) && isTlsOrReality) {
                 val curFp = queryParam(cfg, "fp") ?: "chrome"
-                for (fp in listOf("chrome", "firefox", "safari")) {
+                // 2.68: more fingerprints — edge, ios,
+                // android and randomized join the rotation.
+                for (fp in listOf("chrome", "firefox", "safari", "edge", "ios", "android", "randomized")) {
                     if (fp != curFp) muts += Mut("fp:$fp", setQueryParam(cfg, "fp", fp), false, null, "اثر انگشت $fp", "fingerprint $fp")
                 }
             }
             if (isCustom && isTlsOrReality) {
                 val curFp = customFp(cfg)
                 if (curFp.isNotBlank()) {
-                    for (fp in listOf("chrome", "firefox", "safari")) {
+                    // 2.68: more fingerprints — edge, ios,
+                // android and randomized join the rotation.
+                for (fp in listOf("chrome", "firefox", "safari", "edge", "ios", "android", "randomized")) {
                         if (fp != curFp) {
                             val v = customMutate(cfg) { ob -> setFp(ob, fp) }
                             if (v != null) muts += Mut("fp:$fp", v, false, null, "اثر انگشت $fp", "fingerprint $fp")
@@ -1280,13 +1507,15 @@ Honest limits:
                     }
                 }
             }
-            for (p in listOf(443, 8443, 2053, 2083, 2096)) {
+            // 2.68: more ports — 2087, 2095 and
+            // 8080 join the rotation (cap 3 -> 5).
+            for (p in listOf(443, 8443, 2053, 2083, 2087, 2095, 2096, 8080)) {
                 if (p == port) continue
                 val v = if (isCustom) customMutate(cfg) { ob -> setPort(ob, p) }
                         else if (cfg.startsWith("vmess://")) vmessMutate(cfg) { j -> j.put("port", p.toString()) } else setAuthority(cfg, null, p)
                 if (v != null && v != cfg) {
                     muts += Mut("port:$p", v, false, null, "پورت $p", "port $p")
-                    if (muts.count { it.id.startsWith("port:") } >= 3) break
+                    if (muts.count { it.id.startsWith("port:") } >= 5) break
                 }
             }
             if (isUriLink(cfg)) {
@@ -1329,7 +1558,21 @@ Honest limits:
                         append(ctx, section,
                             "موتور: «$name» با مسیر گرم ($wms ms) وصل می‌شود.",
                             "Engine: \"$name\" connects via its warm route ($wms ms).")
-                        return Plan(warmRaw.first, warmRaw.second, "مسیر گرم", "warm route", warmRaw.third, hostOf)
+                        return Plan(warmRaw.first, warmRaw.second, "مسیر گرم", "warm route", warmRaw.third, hostOf,
+                            emptyList(), -1.0, supportsMuxLink(warmRaw.first) && warmRaw.third != "MUX")
+                    }
+                }
+            }
+            // 2.68: per-network winner (this SSID /
+            // carrier) first — the most specific memory
+            // wins before the wifi/cell memory below.
+            if (!emergency) {
+                val nw = netWinGet(ctx, dedup)
+                if (nw != null) {
+                    val w = muts.firstOrNull { it.id == nw }
+                    if (w != null && System.currentTimeMillis() <= deadline) {
+                        val mw = raceWave(ctx, listOf(w), deadline)
+                        if (mw != null) return win(mw.first, mw.second)
                     }
                 }
             }
@@ -1369,8 +1612,9 @@ Honest limits:
                 return null
             }
             val w1out = raceWaveTop(ctx, wave1, deadline, 3, 250)
-            val w1 = w1out.winners.firstOrNull()
-            if (w1 != null) return win(w1.first, w1.second, standbyLinks(w1out, w1.first))
+            val w1ranked = rankWinnersBySpeed(ctx, w1out.winners, section, deadline)
+            val w1 = w1ranked.firstOrNull()
+            if (w1 != null) return win(w1.first, w1.second, standbyLinks(w1ranked, w1.first), w1.third)
             waveReport(1, wave1.joinToString("، ") { it.labelFa })
             // WAVE 2: IPs + ports + transport + flow.
             val wave2base = muts.filter { m ->
@@ -1411,9 +1655,10 @@ Honest limits:
                 ip == null || !brkActive(ctx, ip)
             }
             val w2out = raceWaveTop(ctx, wave2live, deadline, 3, 250)
-            val w2 = w2out.winners.firstOrNull()
+            val w2ranked = rankWinnersBySpeed(ctx, w2out.winners, section, deadline)
+            val w2 = w2ranked.firstOrNull()
             if (!emergency) for (fm in w2out.failed) { dialIpOf(fm)?.let { brkBump(ctx, it) } }
-            if (w2 != null) return win(w2.first, w2.second, standbyLinks(w2out, w2.first))
+            if (w2 != null) return win(w2.first, w2.second, standbyLinks(w2ranked, w2.first), w2.third)
             waveReport(2, wave2.joinToString("، ") { it.labelFa })
             // WAVE 2.5: CDN pool scan (1.81) — only
             // for TLS WS/gRPC/HTTP configs with an
@@ -1452,9 +1697,10 @@ Honest limits:
                                 "Engine: CDN wave skipped (all edges temporarily benched).")
                         } else {
                             val wcOut = raceWaveTop(ctx, cdnList, deadline, 3, 250)
-                            val wc = wcOut.winners.firstOrNull()
+                            val wcRanked = rankWinnersBySpeed(ctx, wcOut.winners, section, deadline)
+                            val wc = wcRanked.firstOrNull()
                             if (!emergency) for (fm in wcOut.failed) { dialIpOf(fm)?.let { brkBump(ctx, it) } }
-                            if (wc != null) return win(wc.first, wc.second, standbyLinks(wcOut, wc.first))
+                            if (wc != null) return win(wc.first, wc.second, standbyLinks(wcRanked, wc.first), wc.third)
                             append(ctx, section,
                                 "موتور: موج CDN ($cdnName، ${cdnList.size} آی‌پی) جواب نداد.",
                                 "Engine: CDN wave ($cdnName, ${cdnList.size} IPs) did not respond.")
@@ -1465,27 +1711,6 @@ Honest limits:
                 append(ctx, section,
                     "موتور: موج CDN رد شد (مهلت بررسی تمام شد).",
                     "Engine: CDN wave skipped (check deadline passed).")
-            }
-            // WAVE 3: free Cloudflare WARP, generated
-            // in-app (last resort, needs registration).
-            if (System.currentTimeMillis() <= deadline) {
-                val wj = warpJson(ctx)
-                if (wj != null) {
-                    val wm = Mut("warp", wj, false, null, "واپ رایگان کلادفلر", "free Cloudflare WARP")
-                    val w3 = raceWave(ctx, listOf(wm), deadline)
-                    if (w3 != null) return win(w3.first, w3.second)
-                    append(ctx, section,
-                        "موتور: «واپ رایگان کلادفلر» جواب نداد.",
-                        "Engine: \"free Cloudflare WARP\" did not respond.")
-                } else {
-                    append(ctx, section,
-                        "موتور: ساخت حساب واپ ممکن نشد.",
-                        "Engine: WARP account could not be created.")
-                }
-            } else {
-                append(ctx, section,
-                    "موتور: موج واپ رد شد (مهلت بررسی تمام شد).",
-                    "Engine: WARP wave skipped (check deadline passed).")
             }
             // WAVE 4 (1.82): combinations of single wins —
             // the engine's last effort before giving up.
@@ -1530,8 +1755,9 @@ Honest limits:
                 }
                 if (deep.isNotEmpty()) {
                     val w4out = raceWaveTop(ctx, deep, deadline, 3, 250)
-                    val w4 = w4out.winners.firstOrNull()
-                    if (w4 != null) return win(w4.first, w4.second, standbyLinks(w4out, w4.first))
+                    val w4ranked = rankWinnersBySpeed(ctx, w4out.winners, section, deadline)
+                    val w4 = w4ranked.firstOrNull()
+                    if (w4 != null) return win(w4.first, w4.second, standbyLinks(w4ranked, w4.first), w4.third)
                     waveReport(4, deep.joinToString("، ") { it.labelFa })
                 }
             } else {
@@ -1656,8 +1882,8 @@ Honest limits:
      *  this config on this network, kept 24 h.
      *  A repeat connect probes it alone first —
      *  one probe instead of the whole ladder.
-     *  Never stored for emergency, warp or
-     *  combos. The probe gates staleness, so a
+     *  Never stored for emergency or combos.
+     *  The probe gates staleness, so a
      *  dead warm route just falls through. */
     private fun warmKey(ctx: Context, dedupKey: String): String = "warm_" + netKey(ctx) + "_" + dedupKey
 
@@ -1761,10 +1987,10 @@ Honest limits:
 
     /** Everything the engine learned or changed,
      *  undone when the user switches the engine off:
-     *  per-config and global memory, all reports, the
-     *  generated WARP account, and any LIVE engine
-     *  session (a v2ray engine session is stopped, a
-     *  WireGuard engine variant is disconnected).
+     *  per-config and global memory, all reports, and
+     *  any LIVE engine session (a v2ray engine session
+     *  is stopped, a WireGuard engine variant is
+     *  disconnected).
      *  Saved configs are never touched — the engine
      *  never rewrote one — so there is nothing else
      *  to revert. A later normal connect is exactly
@@ -1791,7 +2017,7 @@ Honest limits:
             val e = sp.edit()
             for (k in sp.all.keys) {
                 if (k.startsWith("mem_") || k.startsWith("gmem_") || k.startsWith("report_") ||
-                    k == "warp_account" || k == "engine_wg_active") e.remove(k)
+                    k == "engine_wg_active") e.remove(k)
             }
             e.apply()
         } catch (_: Exception) {}
@@ -1859,165 +2085,22 @@ Honest limits:
         } catch (_: Exception) { HealResult.Failed }
     }
 
-    // ---------- free Cloudflare WARP rung ----------
-
-    /** A WARP account is free, needs no user account
-     *  and no payment, and its configuration can be
-     *  generated in-app with the same API calls the
-     *  wgcf tool performs: register, enable warp,
-     *  fetch the config. The private key never
-     *  leaves the device; the account is cached in
-     *  the engine's own prefs and purged on
-     *  toggle-off. The peer public key is
-     *  Cloudflare's well-known constant. Any failure
-     *  just disables this rung — it never blocks the
-     *  other waves. */
-    private fun warpAccount(ctx: Context): JSONObject? {
-        return try {
-            val raw = store(ctx).getString("warp_account", null) ?: return null
-            JSONObject(raw)
-        } catch (_: Exception) { null }
-    }
-
-    private fun warpHttp(method: String, url: String, token: String?, body: String?): String? {
-        return try {
-            val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
-            conn.requestMethod = method
-            conn.connectTimeout = 8000
-            conn.readTimeout = 8000
-            conn.setRequestProperty("Content-Type", "application/json")
-            if (token != null) conn.setRequestProperty("Authorization", "Bearer $token")
-            if (body != null) {
-                conn.doOutput = true
-                conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-            }
-            val code = conn.responseCode
-            if (code !in 200..299) return null
-            conn.inputStream.bufferedReader().readText()
-        } catch (_: Exception) { null }
-    }
-
-    private fun warpRegister(ctx: Context): JSONObject? {
-        return try {
-            val kp = org.amnezia.awg.crypto.KeyPair()
-            val priv = kp.privateKey.toBase64()
-            val pub = kp.publicKey.toBase64()
-            val installId = java.util.UUID.randomUUID().toString()
-            val tos = try {
-                java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", java.util.Locale.US)
-                    .format(java.util.Date())
-            } catch (_: Exception) { "2026-01-01T00:00:00.000+00:00" }
-            val base = "https://api.cloudflareclient.com/v0a5641/reg"
-            val bodies = listOf(
-                JSONObject().apply {
-                    put("key", pub); put("install_id", installId)
-                    put("fcm_token", "$installId:APA91b" + installId.replace("-", "").take(24))
-                    put("tos", tos); put("model", "PC"); put("locale", "en_US")
-                }.toString(),
-                JSONObject().apply {
-                    put("key", pub); put("install_id", installId); put("tos", tos)
-                }.toString()
-            )
-            var id: String? = null
-            var token: String? = null
-            for (b in bodies) {
-                val r = warpHttp("POST", base, null, b) ?: continue
-                val j = try { JSONObject(r) } catch (_: Exception) { continue }
-                id = j.optString("id", "")
-                token = j.optString("token", "")
-                if (id.isNotBlank() && token.isNotBlank()) break
-                id = null; token = null
-            }
-            if (id.isNullOrBlank() || token.isNullOrBlank()) return null
-            warpHttp("PATCH", "$base/$id", token, "{\"warp_enabled\":true}")
-            val fetched = warpHttp("GET", "$base/$id", token, null) ?: return null
-            val fj = JSONObject(fetched)
-            val cfg = fj.optJSONObject("config") ?: return null
-            val iface = cfg.optJSONObject("interface") ?: return null
-            val addrs = iface.optJSONObject("addresses") ?: return null
-            val v4 = addrs.optString("v4", "")
-            val v6 = addrs.optString("v6", "")
-            val peers = cfg.optJSONArray("peers")
-            val peer = if (peers != null && peers.length() > 0) peers.getJSONObject(0) else null
-            val peerPub = peer?.optString("public_key", "") ?: ""
-            var endpoint = peer?.optString("endpoint", "") ?: ""
-            if (v4.isBlank() || peerPub.isBlank()) return null
-            if (endpoint.isBlank()) endpoint = "engage.cloudflareclient.com:2408"
-            if (!endpoint.contains(":")) endpoint += ":2408"
-            val clientId = cfg.optString("client_id", "").ifBlank { fj.optString("client_id", "") }
-            val acc = JSONObject().apply {
-                put("priv", priv); put("v4", v4); put("v6", v6)
-                put("peer", peerPub); put("endpoint", endpoint)
-                put("client_id", clientId)
-            }
-            store(ctx).edit().putString("warp_account", acc.toString()).apply()
-            acc
-        } catch (_: Exception) { null }
-    }
-
-    /** Full Xray config (custom JSON) for the WARP
-     *  account: a wireguard outbound, so it probes
-     *  and connects through the existing custom
-     *  paths. Null when no account could be made. */
-    fun warpJson(ctx: Context): String? {
-        return try {
-            val acc = warpAccount(ctx) ?: warpRegister(ctx) ?: return null
-            val priv = acc.optString("priv", "")
-            val v4 = acc.optString("v4", "")
-            val v6 = acc.optString("v6", "")
-            val peer = acc.optString("peer", "")
-            val endpoint = acc.optString("endpoint", "")
-            if (priv.isBlank() || v4.isBlank() || peer.isBlank() || endpoint.isBlank()) return null
-            val addrArr = JSONArray().put(v4)
-            if (v6.isNotBlank()) addrArr.put(v6)
-            JSONObject().apply {
-                put("remarks", "WARP (موتور هوشمند)")
-                put("outbounds", JSONArray().put(JSONObject().apply {
-                    put("protocol", "wireguard")
-                    put("tag", "proxy")
-                    put("settings", JSONObject().apply {
-                        put("secretKey", priv)
-                        put("address", addrArr)
-                        put("mtu", 1280)
-                        put("peers", JSONArray().put(JSONObject().apply {
-                            put("publicKey", peer)
-                            put("endpoint", endpoint)
-                            put("allowedIPs", JSONArray().put("0.0.0.0/0").put("::/0"))
-                        }))
-                    })
-                }))
-                put("routing", JSONObject().apply { put("rules", JSONArray()) })
-            }.toString()
-        } catch (_: Exception) { null }
-    }
-
-    /** WARP account's client_id as 3 reserved bytes (or null). Re-registers once when an
-     *  older cached account predates client_id capture, so the standalone WireGuard
-     *  config gains its Reserved line. */
-    fun warpClientId(ctx: Context): List<Int>? {
-        fun decode(cid: String): List<Int>? {
-            return try {
-                android.util.Base64.decode(cid, android.util.Base64.DEFAULT).take(3)
-                    .map { it.toInt() and 0xFF }.takeIf { it.size == 3 }
-            } catch (_: Exception) { null }
-        }
-        val acc = warpAccount(ctx)
-        val cid = acc?.optString("client_id", "") ?: ""
-        if (cid.isNotBlank()) return decode(cid)
-        val fresh = warpRegister(ctx) ?: return null
-        return decode(fresh.optString("client_id", ""))
-    }
-
     // ---------- WireGuard / Amnezia variants ----------
 
-    data class WgVariant(val conf: String, val labelFa: String, val labelEn: String)
+    // 2.68: id carries the variant kind
+    // ("junk:p1", "ip:<ip>", "port:<p>", "mtu:1280")
+    // so the per-network winner can be re-tried first.
+    data class WgVariant(val conf: String, val labelFa: String, val labelEn: String, val id: String = "")
 
-    /** Endpoint variants of one .conf text: alternate
-     *  IPs of the same endpoint host (same port),
-     *  then one alternate port. The ORIGINAL conf is
-     *  NOT in the list — the caller tries these
-     *  first and the original last (fallback). */
-    fun wgVariants(confText: String): List<WgVariant> {
+    /** Endpoint variants of one .conf text: auto junk
+     *  profiles first, then alternate IPs of the same
+     *  endpoint host (same port), MTU 1280, then
+     *  alternate ports. The ORIGINAL conf is NOT in
+     *  the list — the caller tries these first and
+     *  the original last (fallback).
+     *  2.68: `firstId` re-tries a per-network
+     *  learned winner first. */
+    fun wgVariants(confText: String, firstId: String? = null): List<WgVariant> {
         val out = mutableListOf<WgVariant>()
         try {
             val m = Regex("(?m)^\\s*Endpoint\\s*=\\s*(\\S+)\\s*$").find(confText) ?: return out
@@ -2026,10 +2109,44 @@ Honest limits:
             val host = endpoint.substringBefore(":")
             val port = endpoint.substringAfter(":").toIntOrNull() ?: return out
             val isDomain = !host.matches(Regex("^[0-9.]+$")) && !host.contains(":")
+            // 2.68: auto junk profiles (Jc/Jmin/
+            // Jmax ONLY). Junk packets are sent before
+            // the handshake and ignored on receipt, so
+            // they work with any standard WG server.
+            // S1/S2/H1-H4 are NOT varied: they change
+            // the handshake packet bytes themselves and
+            // must match the server exactly, so a blind
+            // value breaks the handshake on plain and
+            // Amnezia servers alike. Junk is also
+            // skipped when the conf already carries
+            // junk keys — those are server-matched.
+            val hasJunk = confText.lines().any { line ->
+                val t = line.trim()
+                val eq = t.indexOf('=')
+                eq > 0 && t.substring(0, eq).trim().lowercase() in setOf("jc", "jmin", "jmax")
+            }
+            if (!hasJunk) {
+                val ifaceIdx = confText.indexOf("[Interface]")
+                if (ifaceIdx >= 0) {
+                    val nl = confText.indexOf('\n', ifaceIdx)
+                    if (nl >= 0) {
+                        val head = confText.substring(0, nl + 1)
+                        val tail = confText.substring(nl + 1)
+                        for (prof in listOf(
+                            arrayOf("junk:p1", "4", "40", "70", "جانک سبک (Jc=4، 40-70)", "light junk (Jc=4, 40-70)"),
+                            arrayOf("junk:p2", "8", "40", "150", "جانک متوسط (Jc=8، 40-150)", "medium junk (Jc=8, 40-150)"),
+                            arrayOf("junk:p3", "5", "120", "600", "جانک سنگین (Jc=5، 120-600)", "heavy junk (Jc=5, 120-600)")
+                        )) {
+                            val v = head + "Jc = " + prof[1] + "\nJmin = " + prof[2] + "\nJmax = " + prof[3] + "\n" + tail
+                            if (v != confText) out += WgVariant(v, prof[4], prof[5], prof[0])
+                        }
+                    }
+                }
+            }
             if (isDomain) {
                 for (ip in resolveIps(host)) {
                     val v = confText.replaceFirst(m.value, m.value.replace(endpoint, ip + ":" + port))
-                    if (v != confText) out += WgVariant(v, "آدرس IP جایگزین $ip", "alternate IP $ip")
+                    if (v != confText) out += WgVariant(v, "آدرس IP جایگزین $ip", "alternate IP $ip", "ip:$ip")
                 }
             }
             if (isDomain) {
@@ -2042,7 +2159,7 @@ Honest limits:
                 for (ip in resolveIpsDoh(host, 4)) {
                     if (!seenDohWg.add(ip)) continue
                     val v = confText.replaceFirst(m.value, m.value.replace(endpoint, ip + ":" + port))
-                    if (v != confText) out += WgVariant(v, "آدرس IP جایگزین $ip (DoH)", "alternate IP $ip (DoH)")
+                    if (v != confText) out += WgVariant(v, "آدرس IP جایگزین $ip (DoH)", "alternate IP $ip (DoH)", "ip:doh:$ip")
                 }
             }
             // 2.37: MTU 1280 variant — survives
@@ -2058,16 +2175,24 @@ Honest limits:
                         if (nl >= 0) confText.substring(0, nl + 1) + "MTU = 1280\n" + confText.substring(nl + 1) else confText
                     } else confText
                 }
-                if (mtuV != confText) out += WgVariant(mtuV, "MTU 1280", "MTU 1280")
+                if (mtuV != confText) out += WgVariant(mtuV, "MTU 1280", "MTU 1280", "mtu:1280")
             }
-            for (p in listOf(443, 8443)) {
+            // 2.68: more ports (2053, 2083 join
+            // 443/8443); up to two are tried.
+            for (p in listOf(443, 8443, 2053, 2083)) {
                 if (p == port) continue
                 val v = confText.replaceFirst(m.value, m.value.replace(endpoint, host + ":" + p))
-                if (v != confText) out += WgVariant(v, "پورت $p", "port $p")
-                break
+                if (v != confText) out += WgVariant(v, "پورت $p", "port $p", "port:$p")
+                if (out.count { it.id.startsWith("port:") } >= 2) break
             }
         } catch (_: Exception) {}
-        return out.take(10)
+        // 2.68: a per-network learned winner goes
+        // first (its id is passed by the caller).
+        val ordered = if (firstId != null) {
+            val hit = out.firstOrNull { it.id == firstId }
+            if (hit != null) listOf(hit) + out.filter { it !== hit } else out
+        } else out
+        return ordered.take(12)
     }
 
     // ---------- OpenVPN variants ----------

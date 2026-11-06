@@ -452,7 +452,7 @@ object VpnConfigBuilder {
      *  primary fails over without restarting
      *  the TUN. Returns null on any problem
      *  (the caller keeps the single build).
-     *  Chain and JSON (warp/custom) links are
+     *  Chain and JSON (custom) links are
      *  never balancer members. */
     fun buildEngineBalancer(ctx: Context, primaryLink: String, standbyLinks: List<String>, includeTun: Boolean): String? {
         return try {

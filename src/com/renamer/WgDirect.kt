@@ -82,6 +82,11 @@ object WgDirect {
     @Volatile private var current: DirectTunnel? = null
     @Volatile private var currentAwg: AwgDirectTunnel? = null
 
+    /** 2.68: the tunnel object
+     *  Smart Connect's engine attempts poll for a
+     *  fresh handshake. */
+    fun currentAwgTunnel(): AwgDirectTunnel? = currentAwg
+
     fun activeConf(ctx: Context): Pair<String, String>? {
         return try {
             val prefs = ctx.getSharedPreferences("renamer_wg", Context.MODE_PRIVATE)
@@ -357,9 +362,9 @@ object WgDirect {
     }
 
     /** Connect an explicit .conf text (used by the Cloudflare test section). */
-    /** AWG's parser throws on unknown attributes and does not know Reserved
-     *  (WARP's 3 handshake bytes). Other apps do use it, so it stays in the
-     *  saved/displayed text — but every in-app parse runs on this filtered copy. */
+    /** AWG's parser throws on unknown attributes and does not know Reserved.
+     *  Other apps do use it, so it stays in the saved/displayed text — but
+     *  every in-app parse runs on this filtered copy. */
     fun stripReserved(conf: String): String =
         conf.lines().filter { !it.trim().startsWith("Reserved", ignoreCase = true) }.joinToString("\n")
 

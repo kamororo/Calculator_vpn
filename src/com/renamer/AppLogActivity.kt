@@ -825,7 +825,29 @@ class AppLogActivity : Activity() {
         logBox.text = if (all.isEmpty()) L(
             "هنوز چیزی ثبت نشده است. وقتی در بخش‌های برنامه اتصالی انجام شود، اینجا می‌نویسد چه شد.",
             "Nothing recorded yet. When a connection happens in any section, it will be written here.")
-        else all.joinToString("\n")
+        else winColoredLog(all)
         logScroll.post { logScroll.fullScroll(ScrollView.FOCUS_DOWN) }
+    }
+
+    /** 2.68: "[\u2713]" lines
+     *  render green + bold — the precise green log
+     *  for a new method that really worked. */
+    private fun winColoredLog(lines: List<String>): CharSequence {
+        return try {
+            val raw = lines.joinToString("\n")
+            val sb = android.text.SpannableStringBuilder(raw)
+            var start = 0
+            for (line in lines) {
+                val end = start + line.length
+                if (line.contains("[\u2713]")) {
+                    sb.setSpan(android.text.style.ForegroundColorSpan(android.graphics.Color.parseColor("#2E7D32")),
+                        start, end, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    sb.setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD),
+                        start, end, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+                start = end + 1
+            }
+            sb
+        } catch (_: Exception) { lines.joinToString("\n") }
     }
 }

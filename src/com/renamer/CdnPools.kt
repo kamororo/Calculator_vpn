@@ -75,6 +75,21 @@ object CdnPools {
         "184.50.0.0/15", "184.84.0.0/14"
     )
 
+    /** ArvanCloud (Iranian CDN): the official
+     *  allowlist (arvancloud.ir/en/dev/ips) plus the
+     *  AS57568/AS208006 BGP prefixes. Verified
+     *  2026-11-06. Detection + pool sampling, like
+     *  the other families. */
+    private val ARVAN = listOf(
+        "185.143.232.0/22", "188.229.116.16/30", "94.101.182.0/27",
+        "2.144.3.128/28", "37.32.16.0/27", "37.32.17.0/27",
+        "37.32.18.0/27", "37.32.19.0/27", "185.215.232.0/22",
+        "178.131.120.48/28", "94.101.183.0/28", "78.157.36.112/28",
+        "95.38.61.80/28", "193.24.119.0/29", "185.204.168.0/22",
+        "185.235.40.0/22", "194.5.192.0/23", "194.5.206.0/23",
+        "193.24.119.0/24", "130.185.120.0/22", "37.32.3.0/24"
+    )
+
     /** Bunny /24 prefixes (first three octets +
      *  trailing dot), derived from the live edge
      *  list. Detection only. */
@@ -172,6 +187,7 @@ object CdnPools {
         if (CF.any { inCidr(ip, it) }) return "cloudflare"
         if (FASTLY.any { inCidr(ip, it) }) return "fastly"
         if (AKAMAI.any { inCidr(ip, it) }) return "akamai"
+        if (ARVAN.any { inCidr(ip, it) }) return "arvan"
         val parts = ip.split(".")
         if (parts.size == 4) {
             val p24 = parts[0] + "." + parts[1] + "." + parts[2] + "."
@@ -185,6 +201,7 @@ object CdnPools {
         "fastly" -> "فستلی"
         "akamai" -> "آکامای"
         "bunny" -> "بانی"
+        "arvan" -> "آروان‌کلاد"
         else -> cdn
     }
 
@@ -193,18 +210,24 @@ object CdnPools {
         "fastly" -> "Fastly"
         "akamai" -> "Akamai"
         "bunny" -> "Bunny"
+        "arvan" -> "ArvanCloud"
         else -> cdn
     }
 
     /** Candidate edge IPs for a CDN, shuffled and
      *  capped. CIDR ranges contribute spread samples
      *  (start, +16, +256, middle, end); Bunny
-     *  contributes its sampled edge IPs directly. */
-    fun candidates(cdn: String, limit: Int): List<String> {
+     *  contributes its sampled edge IPs directly.
+     *  2.68: `dense` (engine CDN wave only) adds
+     *  more offsets (8/64/512, quarter points) —
+     *  the Cloudflare panel keeps the exact 2.67
+     *  offsets, so engine-OFF behaviour is unchanged. */
+    fun candidates(cdn: String, limit: Int, dense: Boolean = false): List<String> {
         val ranges = when (cdn) {
             "cloudflare" -> CF
             "fastly" -> FASTLY
             "akamai" -> AKAMAI
+            "arvan" -> ARVAN
             else -> emptyList()
         }
         val out = mutableListOf<String>()
@@ -216,7 +239,13 @@ object CdnPools {
                 val base = ipLong(cidr.substring(0, slash)) ?: continue
                 val prefix = cidr.substring(slash + 1).toIntOrNull() ?: continue
                 val count = if (prefix >= 32) 1L else (1L shl (32 - prefix))
-                for (o in listOf(1L, 2L, 16L, 256L, 1024L, count / 2, count - 2)) {
+                // 2.68: denser sampling for the engine
+                // CDN wave only (dense = true) — more
+                // edge IPs per range (8/64/512 and
+                // quarter points join the old offsets).
+                val offsets = if (dense) listOf(1L, 2L, 8L, 16L, 64L, 256L, 512L, 1024L, count / 4, count / 2, count * 3 / 4, count - 2)
+                              else listOf(1L, 2L, 16L, 256L, 1024L, count / 2, count - 2)
+                for (o in offsets) {
                     if (o < 1 || o >= count) continue
                     val v = base + o
                     out += "${(v shr 24) and 255}.${(v shr 16) and 255}.${(v shr 8) and 255}.${v and 255}"

@@ -21,8 +21,10 @@ object TunPrefs {
     const val SHARED = "renamer_vpn"
     const val EMERGENCY = "renamer_tun_emergency"
 
-    fun fileFor(tag: String?): String =
-        if (tag == "emergency") EMERGENCY else SHARED
+    fun fileFor(tag: String?): String = when (tag) {
+        "emergency" -> EMERGENCY
+        else -> SHARED
+    }
 
     fun migrateFileIfNeeded(ctx: Context, targetFile: String) {
         if (targetFile == SHARED) return
